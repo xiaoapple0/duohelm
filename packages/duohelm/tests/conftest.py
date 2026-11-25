@@ -43,7 +43,7 @@ def make_plugin(plugin_root: Path) -> MakePlugin:
         plugin_id: str,
         *,
         version: str = "1.0.0",
-        sdk: str = ">=0.1,<0.2",
+        sdk: str = ">=0.2,<0.3",
         requires: dict[str, str] | None = None,
         dirname: str | None = None,
         raw: str | None = None,

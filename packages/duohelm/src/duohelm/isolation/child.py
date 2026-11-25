@@ -33,7 +33,15 @@ from duohelm_sdk import DataSourcePlugin, FactorPlugin
 ALLOWED_METHODS: dict[str, frozenset[str]] = {
     "factor": frozenset({"compute"}),
     "datasource": frozenset(
-        {"capabilities", "trading_calendar", "bars", "adj_factors", "index_constituents"}
+        {
+            "capabilities",
+            "securities",
+            "lookup_securities",
+            "trading_calendar",
+            "bars",
+            "adj_factors",
+            "index_constituents",
+        }
     ),
 }
 _PROTOCOLS: dict[str, type] = {"factor": FactorPlugin, "datasource": DataSourcePlugin}

@@ -86,7 +86,7 @@ class PluginInfo(_Model):
     @classmethod
     def _check_sdk(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("必须声明兼容的 SDK 版本范围，例如 '>=0.1,<0.2'")
+            raise ValueError("必须声明兼容的 SDK 版本范围，例如 '>=0.2,<0.3'")
         return _validate_spec(value)
 
     @field_validator("entrypoint")

@@ -16,7 +16,7 @@
 
 | 类型 (`kind`) | 提供什么 | 接口（`duohelm_sdk.protocols`） |
 |---|---|---|
-| `datasource` 行情源 | 交易日历、K 线、复权因子、指数成分股 | `DataSourcePlugin` |
+| `datasource` 行情源 | 证券列表（含退市）、交易日历、K 线、复权因子、指数成分股 | `DataSourcePlugin` |
 | `operator` 算子 | 返回 polars 表达式的计算函数 | `OperatorPlugin` |
 | `factor` 因子 | 因子定义（表达式或代码） | `FactorPlugin` |
 | `broker` 交易接口 | 账户、持仓、下单、撤单、委托查询 | `BrokerPlugin` |
@@ -31,7 +31,7 @@ id = "my-factors"            # 小写字母开头，只含小写字母、数字�
 name = "自有因子"
 version = "1.2.0"            # 语义化版本
 kind = "factor"
-sdk = ">=0.1,<0.2"           # 兼容的 SDK 版本范围
+sdk = ">=0.2,<0.3"           # 兼容的 SDK 版本范围
 author = "me"
 description = "量价类自有因子"
 entrypoint = "my_factors:plugin"   # 代码式插件的入口：模块:对象。纯表达式因子插件可省略
@@ -145,3 +145,22 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 - SDK 遵循语义化版本。0.x 阶段，不兼容改动升次版本号（0.1 → 0.2）
 - 不兼容改动必须在 PR 里写迁移说明，并同步更新官方参考插件
 - 新增可选字段是兼容改动；删除字段、改变含义、新增必填字段是不兼容改动
+
+### 变更记录
+
+**SDK 0.2.0（M1）**，不兼容：
+
+- `DataSourcePlugin` 新增两个必需方法：
+  - `securities()`：当前在市的证券
+  - `lookup_securities(symbols)`：查询给定代码，可以包含已退市或不存在的代码；只返回有记录的代码
+  - 两者都返回 `schema.SECURITIES_SCHEMA`。平台用后者扫描代码区间、发现退市股
+- `adj_factors()` 的 `factor` 明确定义为**累计后复权比例**，自除权除息日起生效，只能由该日及以前的数据决定（`schema.ADJ_FACTORS_SCHEMA`）
+- 新增 `duohelm_sdk.adjust`：`factors_from_events()` 由除权除息事件计算因子；`adjust_bars()` 计算后复权或以指定日期为基准的前复权
+- 新增检查：`checks.check_securities()`、`checks.check_adj_factors()`
+
+迁移：
+
+- 行情源插件实现 `securities()` 和 `lookup_securities()`
+- 按新定义返回 `adj_factors()`，推荐直接使用 `factors_from_events()`
+- 清单的 `sdk` 改为 `">=0.2,<0.3"`
+- 目前还没有官方参考插件需要同步更新

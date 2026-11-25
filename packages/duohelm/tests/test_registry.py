@@ -5,7 +5,7 @@ from pathlib import Path
 from duohelm.registry import PluginEntry, PluginRegistry, PluginStatus
 
 
-def _scan(root: Path, sdk_version: str = "0.1.0") -> dict[str, PluginEntry]:
+def _scan(root: Path, sdk_version: str = "0.2.0") -> dict[str, PluginEntry]:
     return {e.id: e for e in PluginRegistry([root], sdk_version=sdk_version).scan()}
 
 
@@ -31,10 +31,10 @@ def test_invalid_manifest(plugin_root, make_plugin) -> None:
 
 
 def test_incompatible_sdk(plugin_root, make_plugin) -> None:
-    make_plugin("ops-new", sdk=">=0.2")
+    make_plugin("ops-new", sdk=">=0.3")
     entry = _scan(plugin_root)["ops-new"]
     assert entry.status is PluginStatus.INCOMPATIBLE
-    assert "0.1.0" in entry.problems[0]
+    assert "0.2.0" in entry.problems[0]
 
 
 def test_duplicate_ids_are_all_invalid(plugin_root, make_plugin) -> None:
@@ -67,7 +67,7 @@ def test_dependency_version_mismatch_blocks(plugin_root, make_plugin) -> None:
 
 
 def test_unavailable_dependency_blocks_transitively(plugin_root, make_plugin) -> None:
-    make_plugin("ops-basic", sdk=">=0.2")  # 不兼容
+    make_plugin("ops-basic", sdk=">=0.3")  # 不兼容
     make_plugin("ops-industry", requires={"ops-basic": ""})
     make_plugin("my-factors", requires={"ops-industry": ""})
     entries = _scan(plugin_root)

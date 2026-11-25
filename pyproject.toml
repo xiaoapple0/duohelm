@@ -11,6 +11,7 @@ dev = [
     "ruff>=0.8",
     "pyright>=1.1.390",
     "httpx>=0.27",  # FastAPI TestClient
+    "numpy>=2.0",  # 仅供类型检查：polars 的类型标注引用 numpy.ndarray，缺失时 pyright 严格模式报 Unknown
 ]
 
 [tool.uv]

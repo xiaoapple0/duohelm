@@ -48,8 +48,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      # TODO: 提交 package-lock.json 后改为 npm ci
       - name: Install
-        run: npm install
+        run: npm ci
       - name: Typecheck and build
         run: npm run build

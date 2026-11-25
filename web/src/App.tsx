@@ -16,6 +16,7 @@ import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import OverviewPage from "./pages/OverviewPage";
 import PlaceholderPage from "./pages/PlaceholderPage";
 import PluginsPage from "./pages/PluginsPage";
+import TaskCenterPage from "./pages/tasks/TaskCenterPage";
 
 interface NavItem {
   path: string;
@@ -103,13 +104,7 @@ const NAV: NavItem[] = [
     path: "/tasks",
     label: "任务中心",
     icon: <ScheduleOutlined />,
-    element: (
-      <PlaceholderPage
-        title="任务中心"
-        milestone="M0"
-        description="所有后台任务的进度、日志与失败重试。"
-      />
-    ),
+    element: <TaskCenterPage />,
   },
 ];
 

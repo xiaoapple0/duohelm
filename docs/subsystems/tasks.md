@@ -22,6 +22,7 @@
 | `packages/duohelm/src/duohelm/tasks/worker.py` | worker 循环、心跳线程、重试判断、退避 |
 | `packages/duohelm/src/duohelm/tasks/builtin.py` | 内置任务类型 |
 | `packages/duohelm/src/duohelm/api/tasks.py` | HTTP 接口 |
+| `web/src/pages/tasks/` | Web 任务中心页面；界面文字在 `text.ts` |
 
 ## 数据表
 
@@ -99,4 +100,4 @@
 
 - 历史任务和日志永久保留，没有清理：[#3](https://github.com/xiaoapple0/duohelm/issues/3)
 - handler 在线程里运行，取消是协作式的。handler 不经过检查点时，无法中途停止
-- Web“任务中心”页面在单独的 PR 里实现
+- 任务中心页面只显示最近 100 个任务，还没有翻页（接口已支持 `before_id` 游标）

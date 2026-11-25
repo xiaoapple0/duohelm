@@ -1,0 +1,65 @@
+"""DuoHelm 插件 SDK。
+
+本模块的 ``__all__`` 是对插件作者的公开契约，改动需要维护者确认
+（见 docs/subsystems/plugins.md 的"契约变更"）。
+
+``schema`` 和 ``checks`` 依赖 polars，作为子模块按需导入::
+
+    from duohelm_sdk.checks import check_no_lookahead
+"""
+
+from duohelm_sdk.manifest import (
+    MANIFEST_FILENAME,
+    FactorSpec,
+    Manifest,
+    ManifestError,
+    Permissions,
+    PluginInfo,
+    PluginKind,
+    Requirement,
+    load_manifest,
+    parse_manifest,
+)
+from duohelm_sdk.protocols import (
+    AccountInfo,
+    BrokerPlugin,
+    Capabilities,
+    DataSourcePlugin,
+    FactorPlugin,
+    Freq,
+    Operator,
+    OperatorPlugin,
+    Order,
+    OrderAck,
+    OrderSide,
+    OrderStatus,
+    Position,
+)
+from duohelm_sdk.version import SDK_VERSION
+
+__all__ = [
+    "MANIFEST_FILENAME",
+    "SDK_VERSION",
+    "AccountInfo",
+    "BrokerPlugin",
+    "Capabilities",
+    "DataSourcePlugin",
+    "FactorPlugin",
+    "FactorSpec",
+    "Freq",
+    "Manifest",
+    "ManifestError",
+    "Operator",
+    "OperatorPlugin",
+    "Order",
+    "OrderAck",
+    "OrderSide",
+    "OrderStatus",
+    "Permissions",
+    "PluginInfo",
+    "PluginKind",
+    "Position",
+    "Requirement",
+    "load_manifest",
+    "parse_manifest",
+]

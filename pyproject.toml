@@ -1,0 +1,56 @@
+[project]
+name = "duohelm-workspace"
+version = "0.0.0"
+description = "DuoHelm 开发工作区（不发布）"
+requires-python = ">=3.12"
+dependencies = ["duohelm", "duohelm-sdk"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+    "pyright>=1.1.390",
+    "httpx>=0.27",  # FastAPI TestClient
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+duohelm = { workspace = true }
+duohelm-sdk = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "B", "UP", "N", "SIM", "RUF", "PTH", "DTZ", "PL", "TID",
+]
+ignore = [
+    "PLR2004",  # 测试里的魔法数字
+    "PLR0913",  # 参数个数
+    "RUF001", "RUF002", "RUF003",  # 中文全角标点
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["duohelm", "duohelm_sdk"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["PLR0915", "E402"]  # 测试先检查可选依赖再导入
+
+[tool.pyright]
+include = ["packages"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+strict = ["packages/duohelm-sdk/src", "packages/duohelm/src"]  # 库代码严格；测试用标准模式
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+testpaths = ["packages/duohelm-sdk/tests", "packages/duohelm/tests"]
+addopts = "--import-mode=importlib"

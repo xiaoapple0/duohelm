@@ -81,11 +81,56 @@ description = "价格和成交量排名的10日相关系数取反"
 
 **未来函数扰动检查的局限**：它只能发现"截止日之后的数据改变了之前的结果"，抓不到数据本身就带未来信息的情况（比如行情源返回的复权因子是用今天的价格算的）。后一类问题由行情源的契约检查负责（M1）。
 
-## 隔离（M0 未实现）
+## 隔离
 
-- 每个插件在独立子进程中运行，限制超时和内存
-- 默认没有网络；`permissions.network` 里的主机需用户在页面上确认后放行
-- 凭据由平台注入，插件代码中不得出现凭据
+源码：`packages/duohelm/src/duohelm/isolation/`。用法：
+
+```python
+with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, log=ctx.log) as s:
+    out = s.compute("factor_id", data)  # 返回前已用 check_factor_output 校验
+    check_no_lookahead(lambda d: s.compute("factor_id", d), data, ...)
+```
+
+### 威胁模型
+
+**M0 到 M2 期间，插件来自维护者自己或可信来源。隔离用于防止有错误的代码（死循环、内存泄漏、误用网络、意外读到平台的环境变量）拖垮平台，不防恶意代码。运行第三方插件之前，必须先实现操作系统层的隔离（[#7](https://github.com/xiaoapple0/duohelm/issues/7)）。**
+
+| 方面 | M0 做到了什么 | 防不住什么 |
+|---|---|---|
+| 进程 | 每次会话一个子进程：`python -I -m duohelm.isolation.child`，工作目录是会话临时目录，结束后删除 | — |
+| 超时 | 每次调用 300 秒（`DUOHELM_PLUGIN_TIMEOUT`），超时后结束整棵进程树 | — |
+| 结束进程树 | Windows 用 Job Object，进程以挂起状态启动、加入 Job 后再恢复，venv 启动器之后启动的解释器和插件启动的所有进程都在 Job 里；POSIX 用独立的进程组，外加 psutil 找到的子进程 | POSIX 上调用 `setsid` 脱离进程组、并且在结束时已经找不到的孙进程 |
+| 内存 | 整棵进程树 2 GiB（`DUOHELM_PLUGIN_MEMORY_MB`）。Windows 是 Job Object 硬限制；所有平台的父进程每 0.5 秒检查一次 RSS，超限就结束 | Linux 和 macOS 上两次检查之间的瞬时峰值 |
+| 环境变量 | 只继承白名单里的系统变量；`HOME`、`TEMP` 等指向会话临时目录。`DUOHELM_*`、代理设置和一切凭据都不传 | — |
+| 网络 | **Python 层**拦截：替换 `socket` 模块里的连接、解析和发送入口，M0 不放行任何主机。清单中的 `permissions.network` 在 M1 连同用户确认流程一起实现 | 原生扩展、ctypes、厂商 DLL / so 直接调用系统接口 |
+| 文件系统 | 不限制 | 插件可以读写当前用户能访问的任何文件 |
+| 凭据 | 子进程拿不到任何凭据。存储和注入见 [#6](https://github.com/xiaoapple0/duohelm/issues/6) | — |
+
+### 父子进程协议
+
+- 控制消息走 stdin / stdout：4 字节长度加 JSON，单条不超过 8 MiB，两个方向都检查
+- 子进程启动时先复制 fd 1 留给协议，再把 fd 1 重定向到 stderr，插件的 `print` 和原生库输出都不会破坏协议
+- stderr 作为插件日志转给调用方，每次会话最多 256 KiB，超出部分丢弃，并记一条说明
+- 数据表用 Arrow IPC 文件在会话临时目录里传递。读取时先把整个文件读进内存再解析，不做内存映射，读完立即删除文件（Windows 上被映射的文件删不掉）
+- 子进程只接受规定的方法：因子插件只有 `compute`，行情源插件只有协议里的五个方法。交易接口插件和算子插件不能单独在隔离进程里运行：算子只在依赖它的因子插件的子进程里加载，算子返回的 polars 表达式永远不跨进程
+- 平台在发出 `start` 之后，子进程才导入插件代码；在此之前已经完成 fd 重定向、网络拦截，以及（Windows 上）加入 Job
+
+### 错误分类（`PluginRunError.reason`）
+
+| reason | 含义 | 会话还能继续用吗 |
+|---|---|---|
+| `plugin_error` | 插件自己抛出异常，附 traceback | 能 |
+| `contract` | 返回值类型不对，或没有通过 `check_factor_output` | 能 |
+| `timeout` / `memory` / `cancelled` | 被平台结束 | 不能 |
+| `crashed` | 子进程意外退出 | 不能 |
+| `load` | 插件状态不是 `ready`、种类不支持，或导入失败 | 不能 |
+| `protocol` | 消息超长、格式不对、调用了不允许的方法 | 不能，平台会结束子进程 |
+
+这些错误都不应作为 `RetryableError` 自动重试：同样的输入再跑一次，结果大概率不变。
+
+### 其他
+
+- 插件和平台共用同一个 Python 环境（venv），插件自身的依赖需要装在这个环境里
 - 不支持上传编译好的二进制（DLL / so / dylib）
 
 ## 契约变更

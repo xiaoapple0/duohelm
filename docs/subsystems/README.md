@@ -4,7 +4,7 @@
 
 | 子系统 | 文档 | 源码 | 状态 |
 |---|---|---|---|
-| 插件体系 | [plugins.md](plugins.md) | `packages/duohelm-sdk/`、`packages/duohelm/src/duohelm/registry.py` | M0 进行中 |
+| 插件体系 | [plugins.md](plugins.md) | `packages/duohelm-sdk/`、`packages/duohelm/src/duohelm/registry.py`、`packages/duohelm/src/duohelm/isolation/` | M0 已实现；操作系统层隔离见 #7 |
 | 因子引擎与算子 | [factor-engine.md](factor-engine.md) | `packages/duohelm-sdk/src/duohelm_sdk/checks.py` | M0 只有契约检查 |
 | 行情与数据 | [data.md](data.md) | `packages/duohelm-sdk/src/duohelm_sdk/schema.py` | M0 只有数据格式 |
 | 任务系统 | [tasks.md](tasks.md) | `packages/duohelm/src/duohelm/tasks/`、`packages/duohelm/src/duohelm/api/tasks.py` | M0 后端已实现，页面进行中 |

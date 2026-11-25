@@ -296,8 +296,12 @@ def test_stderr_is_capped(entry: PluginEntry, data: pl.DataFrame) -> None:
         s.compute("double", data)  # 管道一直被读空，插件没有卡住
     notices = [line for line in lines if "后续输出已丢弃" in line]
     assert len(notices) == 1
-    plugin_bytes = sum(len(line.encode()) + 1 for line in lines if line.startswith("line "))
-    assert plugin_bytes <= 2_000
+    plugin_lines = [line for line in lines if line.startswith("line ")]
+    assert plugin_lines
+    # 至少读取了：各行内容 + 行与行之间的换行。最后一行可能是截断的残行，后面没有换行；
+    # Windows 上每行还有一个被去掉的 \r，实际读取的只会更多。
+    min_bytes_read = sum(len(line.encode()) for line in plugin_lines) + len(plugin_lines) - 1
+    assert min_bytes_read <= 2_000
 
 
 # ---- 环境变量和网络 ----

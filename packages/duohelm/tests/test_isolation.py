@@ -125,7 +125,7 @@ id = "{plugin_id}"
 name = "{plugin_id}"
 version = "1.0.0"
 kind = "factor"
-sdk = ">=0.1,<0.2"
+sdk = ">=0.2,<0.3"
 entrypoint = "{module}:plugin"
 
 [[factors]]
@@ -583,3 +583,87 @@ def test_job_refuses_closed_handle() -> None:
         job.contains(os.getpid())
     with pytest.raises(JobClosedError):
         job.assign(os.getpid())
+
+
+DATASOURCE_CODE = r"""
+from datetime import date
+
+import polars as pl
+
+from duohelm_sdk import Capabilities, Freq
+from duohelm_sdk.schema import SECURITIES_SCHEMA
+
+ROWS = [
+    ("600000.SH", "浦发银行", "SH", "stock", date(1999, 11, 10), None),
+    ("600087.SH", "退市长油", "SH", "stock", date(1997, 6, 12), date(2014, 6, 4)),
+]
+
+
+class Source:
+    def capabilities(self):
+        return Capabilities(markets=("CN",), freqs=(Freq.DAY,), fields=("open",))
+
+    def securities(self, *, include_delisted=False):
+        rows = ROWS if include_delisted else [r for r in ROWS if r[5] is None]
+        return pl.DataFrame(rows, schema=SECURITIES_SCHEMA, orient="row")
+
+    def lookup_securities(self, symbols):
+        rows = [r for r in ROWS if r[0] in symbols]
+        return pl.DataFrame(rows, schema=SECURITIES_SCHEMA, orient="row")
+
+    def trading_calendar(self, market, start, end):
+        return pl.DataFrame({"date": [start]})
+
+    def bars(self, symbols, freq, start, end):
+        raise NotImplementedError
+
+    def adj_factors(self, symbols, start, end):
+        raise NotImplementedError
+
+    def index_constituents(self, index, start, end):
+        raise NotImplementedError
+
+
+plugin = Source()
+"""
+
+DATASOURCE_MANIFEST = """
+[plugin]
+id = "iso-source"
+name = "iso-source"
+version = "1.0.0"
+kind = "datasource"
+sdk = ">=0.2,<0.3"
+entrypoint = "iso_source:plugin"
+"""
+
+
+def test_datasource_security_methods(tmp_path: Path) -> None:
+    root = tmp_path / "plugins"
+    path = root / "iso-source"
+    path.mkdir(parents=True)
+    (path / "iso_source.py").write_text(DATASOURCE_CODE, encoding="utf-8")
+    (path / "duohelm-plugin.toml").write_text(DATASOURCE_MANIFEST, encoding="utf-8")
+    [entry] = PluginRegistry([root]).scan()
+    assert entry.status is PluginStatus.READY, entry.problems
+    with PluginSession(entry, limits=FAST) as s:
+        listed = s.call("securities")
+        everything = s.call("securities", include_delisted=True)
+        found = s.call("lookup_securities", ["600087.SH", "609999.SH"])
+    assert listed["symbol"].to_list() == ["600000.SH"]
+    assert everything["symbol"].to_list() == ["600000.SH", "600087.SH"]
+    assert found["symbol"].to_list() == ["600087.SH"]
+    assert found["delist_date"].to_list() == [date(2014, 6, 4)]
+
+
+def test_capabilities_roundtrip_and_unknown_freq_skipped(tmp_path: Path) -> None:
+    from duohelm_sdk import Capabilities, Freq  # noqa: PLC0415
+
+    store = FrameStore(tmp_path, "t")
+    caps = Capabilities(markets=("CN",), freqs=(Freq.DAY,), fields=("open",), lists_delisted=True)
+    assert decode(encode(caps, store), store) == caps
+    # 新版 SDK 的插件可能声明当前版本不认识的频率：跳过，不能报错
+    newer = {"$capabilities": {"markets": ["CN"], "freqs": ["1d", "5s"], "fields": []}}
+    decoded = decode(newer, store)
+    assert decoded.freqs == (Freq.DAY,)
+    assert decoded.lists_delisted is False

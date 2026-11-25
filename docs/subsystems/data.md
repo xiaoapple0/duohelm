@@ -21,6 +21,33 @@
 
 复权因子单独存储，在计算时按需应用。原因：前复权价格会随新的除权事件改变历史值，直接存前复权价格会破坏可复现性，也容易引入未来函数。
 
+复权因子（`ADJ_FACTORS_SCHEMA`，SDK 0.2 起）：
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `date` | Date | 除权除息日 |
+| `symbol` | String | 证券代码 |
+| `factor` | Float64 | **累计后复权比例**，自 `date` 当天起生效，直到下一行；第一行之前视为 1.0 |
+
+- 后复权价 = 未复权价 × factor(t)；以 T 日为基准的前复权价 = 未复权价 × factor(t) / factor(T)
+- 因子只能由 `date` 及以前的事件和行情决定，不得用之后的数据归一化
+- 计算方法（`duohelm_sdk.adjust.factors_from_events`）：每个事件取除权日**之前**最近的收盘价 P，除权参考价 = (P − 每股派现 + 配股价 × 每股配股数) / (1 + 每股送转 + 每股配股数)，比例 = P / 参考价，按日期累乘。有测试守护：截断某日之后的事件或行情，该日及以前的因子不变
+
+证券列表（`SECURITIES_SCHEMA`，SDK 0.2 起）：
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `symbol` | String | 证券代码，唯一 |
+| `name` | String | 名称 |
+| `exchange` | String | `SH` / `SZ` / `BJ`，与代码后缀一致 |
+| `kind` | String | `stock` / `index` |
+| `list_date` | Date | 上市日，未知时为 null |
+| `delist_date` | Date | 退市日（最后一个交易日），仍在市时为 null |
+
+`exchange` 和 `kind` 以后可能新增取值：使用方遇到不认识的取值要跳过这一行，不能报错（`schema.known_securities()`）。
+
+能直接列出退市证券的数据源（如 xtdata）在 `Capabilities.lists_delisted` 中声明，平台直接取完整名单；不能的（如 eltdx），平台用 `lookup_securities` 扫描代码区间。
+
 ## 主数据源：eltdx（M1 决定）
 
 **主数据源为 [eltdx](https://github.com/electkismet/eltdx)**（通达信协议的 Python 库，核心由 Rust 实现；2026-11-25 用 3.3.5 版实测）。M1 不考虑其他数据源。行情源插件放在独立的插件仓库 `duohelm-plugins`，平台本身不依赖 eltdx。

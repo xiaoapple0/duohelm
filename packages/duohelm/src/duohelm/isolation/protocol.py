@@ -118,6 +118,7 @@ def encode(value: object, frames: FrameStore) -> Any:  # noqa: PLR0911  按类�
                 "markets": list(value.markets),
                 "freqs": [str(f) for f in value.freqs],
                 "fields": list(value.fields),
+                "lists_delisted": value.lists_delisted,
             }
         }
     if isinstance(value, list | tuple):
@@ -143,10 +144,13 @@ def decode(value: Any, frames: FrameStore) -> Any:
     if "$date" in obj:
         return date.fromisoformat(str(obj["$date"]))
     if "$capabilities" in obj:
-        caps = cast(dict[str, list[str]], obj["$capabilities"])
+        caps = cast(dict[str, Any], obj["$capabilities"])
+        known_freqs = {f.value for f in Freq}
         return Capabilities(
-            markets=tuple(caps["markets"]),
-            freqs=tuple(Freq(f) for f in caps["freqs"]),
-            fields=tuple(caps["fields"]),
+            markets=tuple(cast(list[str], caps["markets"])),
+            # Freq 是可扩展的枚举：不认识的频率跳过，不能报错
+            freqs=tuple(Freq(f) for f in cast(list[str], caps["freqs"]) if f in known_freqs),
+            fields=tuple(cast(list[str], caps["fields"])),
+            lists_delisted=bool(caps.get("lists_delisted", False)),
         )
     return {k: decode(v, frames) for k, v in obj.items()}

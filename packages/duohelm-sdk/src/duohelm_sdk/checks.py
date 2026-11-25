@@ -13,7 +13,13 @@ from datetime import date
 
 import polars as pl
 
-from duohelm_sdk.schema import FACTOR_OUTPUT_SCHEMA, schema_problems
+from duohelm_sdk.schema import (
+    ADJ_FACTORS_SCHEMA,
+    FACTOR_OUTPUT_SCHEMA,
+    SECURITIES_SCHEMA,
+    known_securities,
+    schema_problems,
+)
 
 ComputeFn = Callable[[pl.DataFrame], pl.DataFrame]
 
@@ -31,6 +37,50 @@ def check_factor_output(out: pl.DataFrame) -> CheckResult:
     """因子输出格式：列为 date、symbol、value，类型正确，(date, symbol) 非空且不重复。"""
     problems = schema_problems(out, FACTOR_OUTPUT_SCHEMA)
     return CheckResult("factor_output", not problems, tuple(problems))
+
+
+def check_securities(df: pl.DataFrame) -> CheckResult:
+    """证券列表：格式、symbol 不重复、交易所与后缀一致、退市日不早于上市日。
+
+    exchange、kind 是可扩展的枚举：不认识的取值不算错误，这些行由使用方跳过
+    （见 :func:`duohelm_sdk.schema.known_securities`），这里只在 details 里说明。
+    """
+    name = "securities"
+    problems = schema_problems(df, SECURITIES_SCHEMA)
+    if problems:
+        return CheckResult(name, False, tuple(problems))
+    known = known_securities(df)
+    notes: list[str] = []
+    skipped = df.height - known.height
+    if skipped:
+        examples = df.join(known, on="symbol", how="anti").get_column("symbol").head(_MAX_EXAMPLES)
+        notes.append(f"跳过 {skipped} 行不认识的 exchange 或 kind，例如 {examples.to_list()}")
+    suffix = pl.col("symbol").str.split(".").list.last()
+    rules: list[tuple[str, pl.Expr]] = [
+        ("symbol 的后缀必须与 exchange 一致", suffix != pl.col("exchange")),
+        ("symbol 必须是 6 位代码加后缀", ~pl.col("symbol").str.contains(r"^\d{6}\.[A-Z]{2}$")),
+        ("delist_date 不能早于 list_date", pl.col("delist_date") < pl.col("list_date")),
+    ]
+    for message, bad in rules:
+        rows = known.filter(bad.fill_null(False))
+        if rows.height:
+            examples = rows.get_column("symbol").head(_MAX_EXAMPLES).to_list()
+            problems.append(f"{message}：{rows.height} 行，例如 {examples}")
+    return CheckResult(name, not problems, (*problems, *notes))
+
+
+def check_adj_factors(df: pl.DataFrame) -> CheckResult:
+    """复权因子：格式、(date, symbol) 不重复、factor 为有限正数。"""
+    name = "adj_factors"
+    problems = schema_problems(df, ADJ_FACTORS_SCHEMA)
+    if problems:
+        return CheckResult(name, False, tuple(problems))
+    factor = pl.col("factor")
+    bad = df.filter(~(factor.is_finite() & (factor > 0)).fill_null(True))
+    if bad.height:
+        examples = bad.select("symbol", "date").head(_MAX_EXAMPLES).rows()
+        problems.append(f"factor 必须是有限正数：{bad.height} 行，例如 {examples}")
+    return CheckResult(name, not problems, tuple(problems))
 
 
 def check_deterministic(compute: ComputeFn, data: pl.DataFrame) -> CheckResult:

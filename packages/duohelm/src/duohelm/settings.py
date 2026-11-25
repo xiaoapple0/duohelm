@@ -28,6 +28,11 @@ class Settings:
         return self.home / "plugins"
 
     @property
+    def data_dir(self) -> Path:
+        """行情数据：Parquet 文件、清单和数据目录库。"""
+        return self.home / "data"
+
+    @property
     def db_path(self) -> Path:
         """元数据库：任务等。"""
         return self.home / "duohelm.db"

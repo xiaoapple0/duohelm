@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import socket
+import subprocess
 import sys
 import textwrap
 import threading
@@ -11,12 +13,13 @@ from collections.abc import Iterator
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 import psutil
 import pytest
 
-from duohelm.isolation import Limits, PluginRunError, PluginSession, child_env
+from duohelm.isolation import Limits, PluginRunError, PluginSession, child_env, runner
 from duohelm.isolation.protocol import (
     MAX_MESSAGE_BYTES,
     FrameStore,
@@ -31,7 +34,9 @@ from duohelm.registry import PluginEntry, PluginRegistry, PluginStatus
 # 一个插件覆盖所有场景：按 factor_id 选择行为，冒号后面是参数。
 PLUGIN_CODE = r"""
 import os
+import os
 import socket
+import subprocess
 from collections.abc import Iterator
 from dataclasses import replace
 import subprocess
@@ -509,3 +514,72 @@ def test_windows_interpreter_in_job(entry: PluginEntry) -> None:
         assert job is not None
         assert s.pid is not None
         assert job.contains(s.pid)
+
+
+def test_child_start_flags(entry: PluginEntry, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows 必须挂起启动（先加入 Job 再恢复）；POSIX 必须自成进程组。"""
+    seen: list[dict[str, object]] = []
+    real_popen = subprocess.Popen
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", spy)  # runner 用的就是这个模块
+    with PluginSession(entry, limits=FAST):
+        pass
+    assert len(seen) == 1
+    flags = seen[0]
+    if sys.platform == "win32":
+        assert flags["creationflags"] == runner._CREATE_SUSPENDED  # pyright: ignore[reportPrivateUsage]
+        assert flags["creationflags"] == 0x00000004  # Win32 CREATE_SUSPENDED
+        assert flags["start_new_session"] is False
+    else:
+        assert flags["start_new_session"] is True
+        assert flags["creationflags"] == 0
+
+
+def test_job_assign_failure_kills_suspended_process(
+    entry: PluginEntry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows Job Object")
+    from duohelm.isolation import _windows  # noqa: PLC0415
+
+    attempted: list[tuple[int, str]] = []
+    resumed: list[int] = []
+
+    def failing_assign(self: _windows.Job, pid: int) -> None:
+        attempted.append((pid, psutil.Process(pid).status()))
+        raise OSError(5, "模拟 AssignProcessToJobObject 失败")
+
+    monkeypatch.setattr(_windows.Job, "assign", failing_assign)
+    monkeypatch.setattr(runner, "_resume", resumed.append)
+
+    session = PluginSession(entry, limits=FAST)
+    try:
+        with pytest.raises(PluginRunError) as info:
+            session.start()
+        assert info.value.reason == "load"
+        assert "Job" in info.value.message
+        assert resumed == [], "加入 Job 失败后不得恢复进程"
+        [(pid, status)] = attempted
+        assert status == psutil.STATUS_STOPPED, "加入 Job 时进程应处于挂起状态"
+        # 在 close() 之前检查：start() 抛错之前就必须结束这个进程，不能依赖会话关闭
+        assert wait_gone(pid, timeout=2), "挂起的进程没有在抛错前被结束"
+    finally:
+        session.close()
+
+
+def test_job_refuses_closed_handle() -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows Job Object")
+    from duohelm.isolation._windows import Job, JobClosedError  # noqa: PLC0415
+
+    job = Job(64 * 1024**2)
+    job.close()
+    # 当前进程很可能在某个 Job 里（例如被 IDE 或终端启动）：空句柄会被当作“任意 Job”
+    with pytest.raises(JobClosedError):
+        job.contains(os.getpid())
+    with pytest.raises(JobClosedError):
+        job.assign(os.getpid())

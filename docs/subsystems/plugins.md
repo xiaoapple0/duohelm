@@ -99,7 +99,7 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 |---|---|---|
 | 进程 | 每次会话一个子进程：`python -I -m duohelm.isolation.child`，工作目录是会话临时目录，结束后删除 | — |
 | 超时 | 每次调用 300 秒（`DUOHELM_PLUGIN_TIMEOUT`），超时后结束整棵进程树 | — |
-| 结束进程树 | Windows 用 Job Object，进程以挂起状态启动、加入 Job 后再恢复，venv 启动器之后启动的解释器和插件启动的所有进程都在 Job 里；POSIX 用独立的进程组，外加 psutil 找到的子进程 | POSIX 上调用 `setsid` 脱离进程组、并且在结束时已经找不到的孙进程 |
+| 结束进程树 | Windows 用 Job Object，进程以挂起状态启动、加入 Job 后再恢复，venv 启动器之后启动的解释器和插件启动的所有进程都在 Job 里；加入 Job 失败时不恢复，直接结束这个挂起的进程并报错；POSIX 用独立的进程组，外加 psutil 找到的子进程 | POSIX 上调用 `setsid` 脱离进程组、并且在结束时已经找不到的孙进程 |
 | 内存 | 整棵进程树 2 GiB（`DUOHELM_PLUGIN_MEMORY_MB`）。Windows 是 Job Object 硬限制；所有平台的父进程每 0.5 秒检查一次 RSS，超限就结束 | Linux 和 macOS 上两次检查之间的瞬时峰值 |
 | 环境变量 | 只继承白名单里的系统变量；`HOME`、`TEMP` 等指向会话临时目录。`DUOHELM_*`、代理设置和一切凭据都不传 | — |
 | 网络 | **Python 层**拦截：替换 `socket` 模块里的连接、解析和发送入口，M0 不放行任何主机。清单中的 `permissions.network` 在 M1 连同用户确认流程一起实现 | 原生扩展、ctypes、厂商 DLL / so 直接调用系统接口 |

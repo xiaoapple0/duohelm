@@ -218,10 +218,20 @@ class PluginSession:
             from duohelm.isolation._windows import Job  # noqa: PLC0415
 
             try:
-                self._job = Job(self.limits.memory_bytes)
-                self._job.assign(proc.pid)
-            finally:
-                psutil.Process(proc.pid).resume()
+                job = Job(self.limits.memory_bytes)
+                self._job = job
+                job.assign(proc.pid)
+            except OSError as exc:
+                # 没有加入 Job 的进程不受内存上限约束、也不会随 Job 一起结束：
+                # 绝不恢复它，直接结束这个仍处于挂起状态的进程。
+                proc.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=_CLOSE_GRACE_S)
+                if self._job is not None:
+                    self._job.close()
+                    self._job = None
+                raise PluginRunError("load", f"无法把插件进程加入 Job Object：{exc}") from exc
+            _resume(proc.pid)
         self._spawn(self._read_messages, "messages")
         self._spawn(self._drain_stderr, "stderr")
         self._spawn(self._monitor, "monitor")
@@ -487,6 +497,11 @@ def _from_error(reply: Mapping[str, Any]) -> PluginRunError:
     else:
         reason = "plugin_error"
     return PluginRunError(reason, str(reply.get("message", "")), reply.get("traceback"))
+
+
+def _resume(pid: int) -> None:
+    """恢复以 CREATE_SUSPENDED 启动的进程（psutil 在 Windows 上用 NtResumeProcess）。"""
+    psutil.Process(pid).resume()
 
 
 def _descendants(pid: int) -> set[int]:

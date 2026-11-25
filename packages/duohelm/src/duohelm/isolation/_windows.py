@@ -82,6 +82,9 @@ if sys.platform == "win32":
     _kernel32.CloseHandle.restype = wintypes.BOOL
     _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
 
+    class JobClosedError(RuntimeError):
+        """Job 句柄已经关闭。"""
+
     def _check(ok: object, what: str) -> None:
         if not ok:
             raise OSError(ctypes.get_last_error(), f"{what} 失败")
@@ -110,24 +113,33 @@ if sys.platform == "win32":
                 "SetInformationJobObject",
             )
 
+        def _open_handle(self) -> int:
+            """当前的 Job 句柄。已关闭时报错：空句柄传给 Win32 API 会被当作“任意 Job”。"""
+            if self._handle is None:
+                raise JobClosedError("Job 已关闭")
+            return self._handle
+
         def assign(self, pid: int) -> None:
+            handle = self._open_handle()
             process = _kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
             _check(process, "OpenProcess")
             try:
                 _check(
-                    _kernel32.AssignProcessToJobObject(self._handle, process),
+                    _kernel32.AssignProcessToJobObject(handle, process),
                     "AssignProcessToJobObject",
                 )
             finally:
                 _kernel32.CloseHandle(process)
 
         def contains(self, pid: int) -> bool:
+            # IsProcessInJob 的 Job 参数为空时，含义是“是否在任意一个 Job 里”，结果会悄悄出错。
+            handle = self._open_handle()
             process = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
             _check(process, "OpenProcess")
             try:
                 result = wintypes.BOOL()
                 _check(
-                    _kernel32.IsProcessInJob(process, self._handle, ctypes.byref(result)),
+                    _kernel32.IsProcessInJob(process, handle, ctypes.byref(result)),
                     "IsProcessInJob",
                 )
                 return bool(result.value)

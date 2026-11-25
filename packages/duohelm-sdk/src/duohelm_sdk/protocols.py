@@ -32,6 +32,12 @@ class Capabilities:
     freqs: tuple[Freq, ...]
     fields: tuple[str, ...]
     """bars() 能提供的字段，除 date、symbol 外。"""
+    lists_delisted: bool = False
+    """能否直接列出已退市的证券。
+
+    为 True 时，平台调用 ``securities(include_delisted=True)`` 直接取得完整名单；
+    为 False 时（数据源的代码表只有在市证券），平台用 ``lookup_securities`` 扫描代码区间。
+    """
 
 
 @runtime_checkable
@@ -40,15 +46,21 @@ class DataSourcePlugin(Protocol):
 
     def capabilities(self) -> Capabilities: ...
 
-    def securities(self) -> pl.DataFrame:
-        """当前在市的证券，格式见 schema.SECURITIES_SCHEMA。"""
+    def securities(self, *, include_delisted: bool = False) -> pl.DataFrame:
+        """证券列表，格式见 schema.SECURITIES_SCHEMA。
+
+        默认只返回当前在市的证券。``include_delisted=True`` 时同时返回已退市的证券，
+        只有 ``capabilities().lists_delisted`` 为 True 的插件才需要支持，其他插件可以
+        抛出 NotImplementedError（平台不会这样调用它们）。
+        """
         ...
 
     def lookup_securities(self, symbols: Sequence[str]) -> pl.DataFrame:
         """查询给定代码，可以包含已退市或根本不存在的代码。格式见 schema.SECURITIES_SCHEMA。
 
-        只返回数据源有记录的代码；已退市的证券 delist_date 不为空。平台用它扫描代码区间、
-        发现退市股（数据源的代码表通常只有在市证券），扫描结果由平台保存，不会重复扫描。
+        只返回数据源有记录的代码；已退市的证券 delist_date 不为空。不能直接列出退市
+        证券的插件（``lists_delisted`` 为 False），平台用它扫描代码区间发现退市股；扫描
+        结果由平台保存，不会重复扫描。
         """
         ...
 

@@ -12,7 +12,7 @@ pl = importlib.import_module("polars") if os.environ.get("CI") else pytest.impor
 
 from duohelm_sdk import Capabilities, DataSourcePlugin, Freq
 from duohelm_sdk.checks import check_securities
-from duohelm_sdk.schema import SECURITIES_SCHEMA
+from duohelm_sdk.schema import SECURITIES_SCHEMA, known_securities
 
 
 def securities(rows):
@@ -37,9 +37,7 @@ def test_valid_securities() -> None:
     ("row", "message"),
     [
         (("600000.SZ", "x", "SH", "stock", None, None), "后缀"),
-        (("600000.HK", "x", "HK", "stock", None, None), "SH / SZ / BJ"),
         (("60000.SH", "x", "SH", "stock", None, None), "6 位"),
-        (("600000.SH", "x", "SH", "fund", None, None), "stock / index"),
         (("600000.SH", "x", "SH", "stock", date(2020, 1, 2), date(2019, 1, 2)), "delist_date"),
     ],
 )
@@ -58,8 +56,9 @@ class _Source:
     def capabilities(self) -> Capabilities:
         return Capabilities(markets=("CN",), freqs=(Freq.DAY,), fields=("open",))
 
-    def securities(self):
-        return securities(GOOD)
+    def securities(self, *, include_delisted: bool = False):
+        rows = GOOD if include_delisted else [r for r in GOOD if r[5] is None]
+        return securities(rows)
 
     def lookup_securities(self, symbols: Sequence[str]):
         return securities([r for r in GOOD if r[0] in symbols])
@@ -87,3 +86,29 @@ class _OldSource(_Source):
 def test_protocol_requires_security_methods() -> None:
     assert isinstance(_Source(), DataSourcePlugin)
     assert not isinstance(_OldSource(), DataSourcePlugin)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        ("00700.HK", "腾讯控股", "HK", "stock", None, None),  # 将来可能新增的交易所
+        ("510300.SH", "沪深300ETF", "SH", "etf", None, None),  # 将来可能新增的种类
+    ],
+)
+def test_unknown_enum_values_are_skipped_not_errors(row) -> None:
+    df = securities([GOOD[0], row])
+    result = check_securities(df)
+    assert result.passed, result.details
+    assert any("跳过 1 行" in d for d in result.details)
+    assert known_securities(df)["symbol"].to_list() == ["600000.SH"]
+
+
+def test_capabilities_lists_delisted_defaults_false() -> None:
+    caps = Capabilities(markets=("CN",), freqs=(Freq.DAY,), fields=())
+    assert caps.lists_delisted is False
+
+
+def test_securities_include_delisted() -> None:
+    source = _Source()
+    assert "600087.SH" not in source.securities()["symbol"].to_list()
+    assert "600087.SH" in source.securities(include_delisted=True)["symbol"].to_list()

@@ -603,8 +603,8 @@ class Source:
     def capabilities(self):
         return Capabilities(markets=("CN",), freqs=(Freq.DAY,), fields=("open",))
 
-    def securities(self):
-        rows = [r for r in ROWS if r[5] is None]
+    def securities(self, *, include_delisted=False):
+        rows = ROWS if include_delisted else [r for r in ROWS if r[5] is None]
         return pl.DataFrame(rows, schema=SECURITIES_SCHEMA, orient="row")
 
     def lookup_securities(self, symbols):
@@ -648,7 +648,22 @@ def test_datasource_security_methods(tmp_path: Path) -> None:
     assert entry.status is PluginStatus.READY, entry.problems
     with PluginSession(entry, limits=FAST) as s:
         listed = s.call("securities")
+        everything = s.call("securities", include_delisted=True)
         found = s.call("lookup_securities", ["600087.SH", "609999.SH"])
     assert listed["symbol"].to_list() == ["600000.SH"]
+    assert everything["symbol"].to_list() == ["600000.SH", "600087.SH"]
     assert found["symbol"].to_list() == ["600087.SH"]
     assert found["delist_date"].to_list() == [date(2014, 6, 4)]
+
+
+def test_capabilities_roundtrip_and_unknown_freq_skipped(tmp_path: Path) -> None:
+    from duohelm_sdk import Capabilities, Freq  # noqa: PLC0415
+
+    store = FrameStore(tmp_path, "t")
+    caps = Capabilities(markets=("CN",), freqs=(Freq.DAY,), fields=("open",), lists_delisted=True)
+    assert decode(encode(caps, store), store) == caps
+    # 新版 SDK 的插件可能声明当前版本不认识的频率：跳过，不能报错
+    newer = {"$capabilities": {"markets": ["CN"], "freqs": ["1d", "5s"], "fields": []}}
+    decoded = decode(newer, store)
+    assert decoded.freqs == (Freq.DAY,)
+    assert decoded.lists_delisted is False

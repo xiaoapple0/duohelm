@@ -57,7 +57,19 @@ SECURITIES_SCHEMA: dict[str, pl.DataType] = {
 """
 
 EXCHANGES = ("SH", "SZ", "BJ")
+"""当前 SDK 认识的交易所。以后可能新增取值，见 :func:`known_securities`。"""
 SECURITY_KINDS = ("stock", "index")
+"""当前 SDK 认识的证券种类。以后可能新增取值，见 :func:`known_securities`。"""
+
+
+def known_securities(df: pl.DataFrame) -> pl.DataFrame:
+    """只保留 exchange 和 kind 都是当前 SDK 认识的取值的行。
+
+    exchange、kind 是可扩展的枚举：使用方遇到不认识的取值要跳过这些行，不能报错，
+    这样新增取值才是兼容改动（见 docs/subsystems/plugins.md 的“契约变更”）。
+    """
+    return df.filter(pl.col("exchange").is_in(EXCHANGES) & pl.col("kind").is_in(SECURITY_KINDS))
+
 
 KEY_COLUMNS = ("date", "symbol")
 

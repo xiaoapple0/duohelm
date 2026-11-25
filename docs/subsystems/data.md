@@ -44,6 +44,10 @@
 | `list_date` | Date | 上市日，未知时为 null |
 | `delist_date` | Date | 退市日（最后一个交易日），仍在市时为 null |
 
+`exchange` 和 `kind` 以后可能新增取值：使用方遇到不认识的取值要跳过这一行，不能报错（`schema.known_securities()`）。
+
+能直接列出退市证券的数据源（如 xtdata）在 `Capabilities.lists_delisted` 中声明，平台直接取完整名单；不能的（如 eltdx），平台用 `lookup_securities` 扫描代码区间。
+
 ## 主数据源：eltdx（M1 决定）
 
 **主数据源为 [eltdx](https://github.com/electkismet/eltdx)**（通达信协议的 Python 库，核心由 Rust 实现；2026-11-25 用 3.3.5 版实测）。M1 不考虑其他数据源。行情源插件放在独立的插件仓库 `duohelm-plugins`，平台本身不依赖 eltdx。

@@ -15,10 +15,9 @@ import polars as pl
 
 from duohelm_sdk.schema import (
     ADJ_FACTORS_SCHEMA,
-    EXCHANGES,
     FACTOR_OUTPUT_SCHEMA,
     SECURITIES_SCHEMA,
-    SECURITY_KINDS,
+    known_securities,
     schema_problems,
 )
 
@@ -41,25 +40,33 @@ def check_factor_output(out: pl.DataFrame) -> CheckResult:
 
 
 def check_securities(df: pl.DataFrame) -> CheckResult:
-    """证券列表：格式、symbol 不重复、交易所与后缀一致、种类合法、退市日不早于上市日。"""
+    """证券列表：格式、symbol 不重复、交易所与后缀一致、退市日不早于上市日。
+
+    exchange、kind 是可扩展的枚举：不认识的取值不算错误，这些行由使用方跳过
+    （见 :func:`duohelm_sdk.schema.known_securities`），这里只在 details 里说明。
+    """
     name = "securities"
     problems = schema_problems(df, SECURITIES_SCHEMA)
     if problems:
         return CheckResult(name, False, tuple(problems))
+    known = known_securities(df)
+    notes: list[str] = []
+    skipped = df.height - known.height
+    if skipped:
+        examples = df.join(known, on="symbol", how="anti").get_column("symbol").head(_MAX_EXAMPLES)
+        notes.append(f"跳过 {skipped} 行不认识的 exchange 或 kind，例如 {examples.to_list()}")
     suffix = pl.col("symbol").str.split(".").list.last()
     rules: list[tuple[str, pl.Expr]] = [
-        ("exchange 必须是 SH / SZ / BJ", ~pl.col("exchange").is_in(EXCHANGES)),
         ("symbol 的后缀必须与 exchange 一致", suffix != pl.col("exchange")),
         ("symbol 必须是 6 位代码加后缀", ~pl.col("symbol").str.contains(r"^\d{6}\.[A-Z]{2}$")),
-        ("kind 必须是 stock / index", ~pl.col("kind").is_in(SECURITY_KINDS)),
         ("delist_date 不能早于 list_date", pl.col("delist_date") < pl.col("list_date")),
     ]
     for message, bad in rules:
-        rows = df.filter(bad.fill_null(False))
+        rows = known.filter(bad.fill_null(False))
         if rows.height:
             examples = rows.get_column("symbol").head(_MAX_EXAMPLES).to_list()
             problems.append(f"{message}：{rows.height} 行，例如 {examples}")
-    return CheckResult(name, not problems, tuple(problems))
+    return CheckResult(name, not problems, (*problems, *notes))
 
 
 def check_adj_factors(df: pl.DataFrame) -> CheckResult:

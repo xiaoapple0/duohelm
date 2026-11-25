@@ -145,22 +145,28 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 - SDK 遵循语义化版本。0.x 阶段，不兼容改动升次版本号（0.1 → 0.2）
 - 不兼容改动必须在 PR 里写迁移说明，并同步更新官方参考插件
 - 新增可选字段是兼容改动；删除字段、改变含义、新增必填字段是不兼容改动
+- **枚举以后可能新增取值**，新增取值是兼容改动。契约中的枚举包括 `SECURITIES_SCHEMA` 的 `kind` 和 `exchange`、`Freq`、`Capabilities.markets` 等。使用方（平台和插件）遇到不认识的取值时，**跳过这一项并记一条日志，不能报错**：
+  - 证券列表用 `schema.known_securities()` 过滤，`checks.check_securities()` 对不认识的取值只做说明，不判为不合格
+  - 隔离协议解码 `Capabilities` 时，跳过不认识的 `Freq`
+  - 清单字段（如插件的 `kind`）不在此列：清单受 `sdk` 版本范围约束，用了新取值的插件会被判为 SDK 不兼容，而不是被当作错误
 
 ### 变更记录
 
 **SDK 0.2.0（M1）**，不兼容：
 
-- `DataSourcePlugin` 新增两个必需方法：
-  - `securities()`：当前在市的证券
+- `DataSourcePlugin` 新增两个必需方法，都返回 `schema.SECURITIES_SCHEMA`：
+  - `securities(*, include_delisted=False)`：证券列表，默认只含在市证券
   - `lookup_securities(symbols)`：查询给定代码，可以包含已退市或不存在的代码；只返回有记录的代码
-  - 两者都返回 `schema.SECURITIES_SCHEMA`。平台用后者扫描代码区间、发现退市股
+- `Capabilities` 新增可选字段 `lists_delisted`（默认 False），声明能否直接列出退市证券：
+  - 为 True（如 xtdata）：平台调用 `securities(include_delisted=True)` 直接取完整名单
+  - 为 False（如 eltdx，代码表只有在市证券）：平台用 `lookup_securities` 扫描代码区间，扫描结果保存在平台，不重复扫描
 - `adj_factors()` 的 `factor` 明确定义为**累计后复权比例**，自除权除息日起生效，只能由该日及以前的数据决定（`schema.ADJ_FACTORS_SCHEMA`）
 - 新增 `duohelm_sdk.adjust`：`factors_from_events()` 由除权除息事件计算因子；`adjust_bars()` 计算后复权或以指定日期为基准的前复权
-- 新增检查：`checks.check_securities()`、`checks.check_adj_factors()`
+- 新增检查：`checks.check_securities()`、`checks.check_adj_factors()`；新增 `schema.known_securities()`
 
 迁移：
 
-- 行情源插件实现 `securities()` 和 `lookup_securities()`
+- 行情源插件实现 `securities()` 和 `lookup_securities()`；能直接列出退市证券的，在 `capabilities()` 里设置 `lists_delisted=True`，并支持 `include_delisted=True`
 - 按新定义返回 `adj_factors()`，推荐直接使用 `factors_from_events()`
 - 清单的 `sdk` 改为 `">=0.2,<0.3"`
 - 目前还没有官方参考插件需要同步更新

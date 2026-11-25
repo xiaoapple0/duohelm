@@ -63,7 +63,7 @@ def _serve(settings: Settings, out: TextIO) -> int:
             f"警告：正在监听 {settings.host}。现阶段 API 没有登录保护，局域网内的任何人都能访问。",
             file=out,
         )
-    uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
+    uvicorn.run(create_app(settings, run_workers=True), host=settings.host, port=settings.port)
     return 0
 
 

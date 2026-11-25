@@ -213,7 +213,8 @@ class PluginSession:
             creationflags=_CREATE_SUSPENDED if windows else 0,
         )
         self._proc = proc
-        if windows:
+        # 直接写 sys.platform 判断：pyright 只认这种写法，在 Linux / macOS 上跳过这段代码。
+        if sys.platform == "win32":
             from duohelm.isolation._windows import Job  # noqa: PLC0415
 
             try:

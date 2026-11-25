@@ -10,6 +10,24 @@ from duohelm_sdk import MANIFEST_FILENAME
 MakePlugin = Callable[..., Path]
 
 
+class FakeClock:
+    """可手动推进的毫秒时钟，让租约、退避等时间逻辑不依赖真实等待。"""
+
+    def __init__(self, start: int = 1_700_000_000_000) -> None:
+        self.now = start
+
+    def __call__(self) -> int:
+        return self.now
+
+    def advance(self, ms: int) -> None:
+        self.now += ms
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    return FakeClock()
+
+
 @pytest.fixture
 def plugin_root(tmp_path: Path) -> Path:
     root = tmp_path / "plugins"

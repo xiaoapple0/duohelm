@@ -18,18 +18,32 @@ class Settings:
     """数据根目录：行情、因子缓存、元数据、插件。"""
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
+    dev: bool = False
+    """开发模式：注册 demo.sleep 等只用于开发和演示的任务类型。"""
+    task_workers: int = 1
+    """serve 进程里同时运行的任务数。"""
 
     @property
     def plugin_dir(self) -> Path:
         return self.home / "plugins"
 
+    @property
+    def db_path(self) -> Path:
+        """元数据库：任务等。"""
+        return self.home / "duohelm.db"
+
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
-        """读取 DUOHELM_HOME；未设置时使用 ~/.duohelm。"""
+        """读取 DUOHELM_HOME（默认 ~/.duohelm）、DUOHELM_DEV、DUOHELM_TASK_WORKERS。"""
         env = os.environ if env is None else env
         raw = env.get("DUOHELM_HOME", "").strip()
         home = Path(raw).expanduser() if raw else Path.home() / ".duohelm"
-        return cls(home=home)
+        dev = env.get("DUOHELM_DEV", "").strip() == "1"
+        workers_raw = env.get("DUOHELM_TASK_WORKERS", "").strip()
+        task_workers = int(workers_raw) if workers_raw else 1
+        if task_workers < 1:
+            raise ValueError(f"DUOHELM_TASK_WORKERS 必须是正整数，当前为 {workers_raw}")
+        return cls(home=home, dev=dev, task_workers=task_workers)
 
 
 def is_loopback(host: str) -> bool:

@@ -17,6 +17,25 @@ def test_default_home() -> None:
     assert Settings.from_env({}).home == Path.home() / ".duohelm"
 
 
+def test_task_settings_defaults(tmp_path: Path) -> None:
+    settings = Settings.from_env({"DUOHELM_HOME": str(tmp_path)})
+    assert settings.db_path == tmp_path / "duohelm.db"
+    assert settings.dev is False
+    assert settings.task_workers == 1
+
+
+def test_dev_mode_requires_exactly_one() -> None:
+    assert Settings.from_env({"DUOHELM_DEV": "1"}).dev is True
+    assert Settings.from_env({"DUOHELM_DEV": "true"}).dev is False
+    assert Settings.from_env({"DUOHELM_DEV": "0"}).dev is False
+
+
+def test_task_workers_from_env() -> None:
+    assert Settings.from_env({"DUOHELM_TASK_WORKERS": "3"}).task_workers == 3
+    with pytest.raises(ValueError, match="DUOHELM_TASK_WORKERS"):
+        Settings.from_env({"DUOHELM_TASK_WORKERS": "0"})
+
+
 def test_default_host_is_loopback() -> None:
     assert is_loopback(DEFAULT_HOST)
 

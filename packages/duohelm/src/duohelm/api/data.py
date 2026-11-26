@@ -63,9 +63,9 @@ class SnapshotsOut(BaseModel):
 
 class SecurityOut(BaseModel):
     symbol: str
-    name: str
-    exchange: str
-    kind: str
+    name: str | None
+    exchange: str | None
+    kind: str | None
     list_date: date | None
     delist_date: date | None
 
@@ -78,12 +78,12 @@ class SecuritiesOut(BaseModel):
 
 class BarOut(BaseModel):
     date: date
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-    amount: float
+    open: float | None
+    high: float | None
+    low: float | None
+    close: float | None
+    volume: float | None
+    amount: float | None
 
 
 class BarsOut(BaseModel):

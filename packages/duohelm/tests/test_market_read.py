@@ -570,3 +570,27 @@ def test_reader_errors(reader: MarketReader, built: Built) -> None:
         reader.bars("600000.SH", start=d(5), end=d(2))
     with pytest.raises(InvalidQueryError):
         reader.coverage(limit=0)
+
+
+def test_null_fields_do_not_cause_500(home: Settings, get_empty: Get) -> None:
+    """数据标准只要求 date、symbol 非空；名称、价格为空的行读出来是 null，不是 500。"""
+    store = DataStore(home.data_dir)
+    sec = securities_frame().filter(pl.col("symbol") == "600000.SH")
+    sec = sec.with_columns(
+        pl.lit(None, dtype=pl.String).alias("name"), pl.lit(None, dtype=pl.String).alias("kind")
+    )
+    rows = bar_rows("600000.SH", [2, 3])
+    rows[0]["close"] = None
+    rows[0]["volume"] = None
+    with store.transaction() as tx:
+        tx.write("securities", sec)
+        tx.write("bars_1d", bars_frame(rows))
+        tx.write("adj_factors", factors_frame([(11, 2.0)]))
+    items = get_empty("/api/data/securities").json()["items"]
+    assert items[0]["name"] is None and items[0]["kind"] is None
+    for mode in ("none", "hfq", "qfq"):
+        r = get_empty("/api/data/securities/600000.SH/bars", adjust=mode)
+        assert r.status_code == 200, mode
+        first = r.json()["bars"][0]
+        assert first["close"] is None and first["volume"] is None
+        assert first["open"] == 2.0

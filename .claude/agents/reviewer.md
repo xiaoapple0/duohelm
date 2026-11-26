@@ -22,13 +22,14 @@ tools: Read, Grep, Glob
 
 - 工作区路径、当前分支、`git ls-remote origin refs/heads/main`（远程 main 的最新提交）
 - `git merge-base HEAD <远程 main>`，以及 `git log --oneline <merge-base>..<远程 main>`（分支落后的提交）
-- `git log --stat <远程 main>..HEAD`（本分支的提交和各自改动的文件）
+- `git log --stat <merge-base>..HEAD`（本分支的提交和各自改动的文件）
 - `git diff <merge-base>...HEAD --stat` 和完整的 `git diff`
+- 改动文件的大小（字节）
 - `git ls-files -i -c --exclude-standard`（被跟踪却应被忽略的文件）
 - 已有 PR 时 `gh pr view <分支> --json number,state,mergedAt`
 - diff 改动了 `.github/` 时，`gh api repos/xiaoapple0/duohelm/rules/branches/main` 的必需检查
 
-审查材料缺了某一节、或者某条命令报错时，把对应的检查项写进“没能检查的项”，不要自己推断结果。
+某一节写着“报错”或“未运行”、或者整节缺失时，把对应的检查项写进“没能检查的项”，不要自己推断结果。小节标题里写了“为空表示……”的，为空才是正常结果。
 
 ## 检查项
 
@@ -80,7 +81,7 @@ tools: Read, Grep, Glob
 
 - 数据文件：Parquet、Arrow、Feather、pickle、gz、zst、csv 行情等，以及 `.local-data/` 下的任何内容
 - 二进制文件：DLL、so、dylib、exe、编译产物
-- 超过 100 KB 的文件（`uv.lock` 除外）
+- 超过 100 KB 的文件（`uv.lock` 除外），看审查材料里“改动文件的大小”一节
 - 内网地址和真实连接地址：私有网段的 IP（10.x、172.16–31.x、192.168.x）。测试或文档里作为示例出现的要逐个判断，真实环境的地址一律不行
 - 凭据、token、`.env`、本机配置文件（如 `miniqmt.toml`）
 - `git add -f` 绕过 `.gitignore` 的痕迹：审查材料里 `git ls-files -i -c --exclude-standard` 一节应为空

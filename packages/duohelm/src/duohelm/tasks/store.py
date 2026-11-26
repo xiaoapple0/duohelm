@@ -24,7 +24,7 @@ Backoff = Callable[[int], int]
 """已执行次数 -> 下一次重试前等待的毫秒数。"""
 
 MIN_SQLITE_VERSION = (3, 35, 0)  # UPDATE ... RETURNING
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 5_000
 
 ALLOWED_TRANSITIONS: Mapping[TaskStatus, frozenset[TaskStatus]] = {
@@ -72,6 +72,18 @@ CREATE TABLE task_logs (
   message TEXT    NOT NULL
 );
 CREATE INDEX task_logs_task ON task_logs(task_id, id);
+"""
+
+# 版本 2：定时规则（见 tasks/schedule.py）。只新建一张表，不动版本 1 的数据。
+_SCHEMA_V2 = """
+CREATE TABLE schedules (
+  name              TEXT PRIMARY KEY,
+  enabled           INTEGER NOT NULL DEFAULT 0,
+  plugin_id         TEXT,
+  run_time          TEXT    NOT NULL,
+  last_trigger_date TEXT,
+  updated_at        INTEGER NOT NULL
+);
 """
 
 
@@ -204,6 +216,11 @@ class TaskStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
 
+    @property
+    def path(self) -> Path:
+        """数据库文件。定时规则表（tasks/schedule.py）和任务表在同一个库里。"""
+        return self._path
+
     # ---- 连接 ----
 
     @contextmanager
@@ -243,6 +260,8 @@ class TaskStore:
                 for statement in _SCHEMA_V1.split(";"):
                     if statement.strip():
                         conn.execute(statement)
+            if version < 2:
+                conn.execute(_SCHEMA_V2)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # ---- 读 ----

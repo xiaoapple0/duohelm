@@ -10,7 +10,7 @@
 ## 不负责什么
 
 - **隔离**：handler 在 serve 进程的线程里运行，只运行平台自己的代码。插件代码一律经由隔离子进程运行（`session_for`，见 [plugins.md](plugins.md) 的“隔离”），例如 `data.sync`
-- **定时触发**：任务系统只执行已经提交的任务，不做 cron
+- **通用 cron**：任务系统只执行已经提交的任务。定时触发只支持“每个交易日 HH:MM”这一种规则，见下面的“定时触发”
 - **交易委托**：见下面的“正确性要求”
 
 ## 源码
@@ -21,7 +21,9 @@
 | `packages/duohelm/src/duohelm/tasks/types.py` | 任务类型、参数模型、注册表、`TaskContext` |
 | `packages/duohelm/src/duohelm/tasks/worker.py` | worker 循环、心跳线程、重试判断、退避 |
 | `packages/duohelm/src/duohelm/tasks/builtin.py` | 内置任务类型 |
+| `packages/duohelm/src/duohelm/tasks/schedule.py` | 定时触发：规则存储、触发判断、后台线程 |
 | `packages/duohelm/src/duohelm/api/tasks.py` | HTTP 接口 |
+| `packages/duohelm/src/duohelm/api/schedules.py` | 定时规则的 HTTP 接口 |
 | `web/src/pages/tasks/` | Web 任务中心页面；界面文字在 `text.ts` |
 
 ## 数据表
@@ -36,6 +38,7 @@
   - `worker_id` / `lease_expires_at`：当前持有者和租约到期时间
   - `dedupe_key`：同一个 key 同时只允许一个未结束的任务（唯一部分索引）
 - `task_logs`：只追加。每条带 `attempt`，按自增 `id` 增量拉取
+- `schedules`（版本 2 新增）：定时规则，目前只有 `data.sync` 一行，见“定时触发”。迁移只新建这张表，旧数据不动
 
 ## 状态流转
 
@@ -91,6 +94,35 @@
 | POST | `/api/tasks/{id}/cancel` | 取消。已结束的任务返回 409 |
 | POST | `/api/tasks/{id}/retry` | 手动重试。状态不对或 `dedupe_key` 冲突返回 409 |
 
+## 定时触发
+
+源码：`tasks/schedule.py`。作用：每个交易日收盘后自动提交一次增量 `data.sync`。它只是“按时提交任务”，任务的执行、重试、日志仍由任务系统负责。
+
+**规则**：只支持“每个交易日 HH:MM（Asia/Shanghai）”，不做通用 cron。
+
+- **时间必须晚于 15:30**，早于或等于 15:30 的配置被拒绝（422）。原因：`data.sync` 盘中的日线不能入库，当天的日线和 ST、成分快照只在北京时间 15:30 之后才写。默认 16:00
+- **默认关闭**。用户启用并指定行情源插件 id（`plugin_id`）之后才触发。修改规则只改传入的字段，没有传的字段保持用户已设的值；平台的默认值只在从未配置过时使用
+- **时间换算**：触发时刻、“今天”的日期都由当前时间按 Asia/Shanghai（固定 UTC+8）换算，不依赖本机时区
+- **哪些日子触发**：周末不触发。当前快照的 `CN` 日历覆盖到今天（日历里有不早于今天的日期）时，按日历判断，今天不在日历里（节假日）就不触发。日历没有覆盖到今天时（例如日历只同步到昨天，或还没有任何快照）**照常触发**，由 `data.sync` 自己判断：非交易日没有日线，也不写快照，任务正常结束。读日历失败同样按“没覆盖”处理，不当成“不是交易日”
+- **提交的任务**：`data.sync`，参数 `plugin_id` 加 `start`（触发当天往前 30 个自然日，复用现有参数，不新增参数），`end` 用默认值（最近一个已收盘的日子）。复权因子 `data.sync` 总是从 1990-12-19 请求，不受 `start` 影响；只写有变化的行，窗口内没有变化时不产生新快照。窗口让几天内没运行、或数据源修正过的日线也被补上；停机超过 30 天的缺口需要手动做一次全量同步
+- **去重**：`dedupe_key` 为 `schedule:data.sync`。已有未结束（排队或运行中）的同类任务时，跳过这次触发并记日志，不重复提交。这一天仍记为“已触发”，不会每个检查周期重试
+- **补跑**：serve 没运行时错过的触发，启动后只在“同一天、已过触发时间、当天还没触发过”时补跑一次，并记日志。更早的日子不补跑：过去日子的 ST、成分快照补不回来，日线会在下一次同步的窗口里补上。判断靠 `last_trigger_date`（上次处理的北京日期，触发、被去重跳过、判定为非交易日都会记下）：当天已处理过就不再触发，所以重启 serve 不会重复提交
+- **启用或改时间的当天**：如果当时已经过了触发时间，不立即补跑，视为当天已处理，从下一个交易日开始触发；需要当天同步请手动提交
+- **后台线程**：serve 在应用生命周期内启动一个调度线程，启动时立即检查一次（用于补跑），之后每 30 秒检查一次。线程不执行同步，只把任务放进队列，由 worker 执行。时钟可注入，测试用假时钟直接调用 `tick()`
+
+**存储**：表 `schedules`（`name` 主键，`enabled`、`plugin_id`、`run_time`、`last_trigger_date`、`updated_at`），在 `$DUOHELM_HOME/duohelm.db`。
+
+**下次触发时间**：从今天起逐日找第一个会触发的日子，按同样的周末、日历规则判断，最多往后看 14 天；今天已触发过的跳过，今天未触发且已过触发时间的仍返回今天（下一次检查就会触发）；未启用时为空。日历没覆盖的未来日子只能按周末判断，遇到节假日时实际不会触发，所以这是预估。
+
+## HTTP 接口（定时规则）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/schedules/data-sync` | `{enabled, plugin_id, time, timezone, last_trigger_date, next_run_at}` |
+| PATCH | `/api/schedules/data-sync` | `{enabled?, plugin_id?, time?}`，只改传入的字段，返回同上。`time` 格式 `HH:MM` 且晚于 15:30，否则 422；`enabled=true` 但没有 `plugin_id` 返回 422 |
+
+页面（查看和修改规则、显示下次触发时间）不在这里做，归 [#33](https://github.com/xiaoapple0/duohelm/issues/33)（同步任务页面）。
+
 ## 正确性要求
 
 - **handler 必须可以安全地重复执行。** 同一个任务可能因为自动重试、手动重试或 worker 中断而被执行多次，也可能在旧的一次执行还没退出时，新的一次已经开始。handler 的副作用必须是幂等的：例如先写到临时位置再原子替换，或按确定的键覆盖写入，不能用追加的方式写结果
@@ -101,4 +133,6 @@
 
 - 历史任务和日志永久保留，没有清理：[#3](https://github.com/xiaoapple0/duohelm/issues/3)
 - handler 在线程里运行，取消是协作式的。handler 不经过检查点时，无法中途停止
+- 定时规则的页面还没有，只有 API，归 #33
+- 定时触发不检查 `plugin_id` 是否存在、是否 `ready`：配错时每个交易日提交一个会失败的 `data.sync`，失败在任务中心可见
 - 任务中心页面只显示最近 100 个任务，还没有翻页（接口已支持 `before_id` 游标）

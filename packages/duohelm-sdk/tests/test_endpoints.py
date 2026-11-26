@@ -103,7 +103,7 @@ id = "demo-source"
 name = "示例行情源"
 version = "0.1.0"
 kind = "datasource"
-sdk = ">=0.3,<0.4"
+sdk = ">=0.4,<0.5"
 entrypoint = "demo_source:plugin"
 
 [permissions]

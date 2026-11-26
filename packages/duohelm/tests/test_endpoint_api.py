@@ -33,7 +33,7 @@ id = "xt"
 name = "xt"
 version = "{version}"
 kind = "datasource"
-sdk = ">=0.3,<0.4"
+sdk = ">=0.4,<0.5"
 entrypoint = "xt:plugin"
 
 [[permissions.endpoints]]
@@ -162,7 +162,7 @@ id = "net"
 name = "net"
 version = "{version}"
 kind = "datasource"
-sdk = ">=0.3,<0.4"
+sdk = ">=0.4,<0.5"
 entrypoint = "net:plugin"
 
 [permissions]

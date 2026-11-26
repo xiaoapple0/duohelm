@@ -111,7 +111,7 @@ class PluginInfo(_Model):
     @classmethod
     def _check_sdk(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("必须声明兼容的 SDK 版本范围，例如 '>=0.3,<0.4'")
+            raise ValueError("必须声明兼容的 SDK 版本范围，例如 '>=0.4,<0.5'")
         return _validate_spec(value)
 
     @field_validator("entrypoint")
@@ -148,7 +148,7 @@ class Permissions(_Model):
     network: tuple[str, ...] = ()
     """插件需要访问的公网主机名或公网 IP（可带端口）。不允许协议、路径和通配符。
 
-    SDK 0.3.1 起只允许公网地址：本机、私有网段等地址在解析清单时拒绝，需要连接本机或
+    SDK 0.4 起只允许公网地址：本机、私有网段等地址在解析清单时拒绝，需要连接本机或
     局域网服务的插件改用 ``endpoints``（由用户填写并确认地址）。整个列表由用户在平台里确认
     一次后才放行，列表变了需要重新确认。"""
     endpoints: tuple[Endpoint, ...] = ()

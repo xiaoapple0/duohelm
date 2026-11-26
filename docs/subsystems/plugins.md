@@ -31,13 +31,13 @@ id = "my-factors"            # 小写字母开头，只含小写字母、数字�
 name = "自有因子"
 version = "1.2.0"            # 语义化版本
 kind = "factor"
-sdk = ">=0.3,<0.4"           # 兼容的 SDK 版本范围
+sdk = ">=0.4,<0.5"           # 兼容的 SDK 版本范围
 author = "me"
 description = "量价类自有因子"
 entrypoint = "my_factors:plugin"   # 代码式插件的入口：模块:对象。纯表达式因子插件可省略
 
 [permissions]
-network = []                 # 需要访问的公网主机名或公网 IP（SDK 0.3.1 起只允许公网）。默认没有网络
+network = []                 # 需要访问的公网主机名或公网 IP（SDK 0.4 起只允许公网）。默认没有网络
 # 本机或局域网的服务（如 MiniQMT）用 [[permissions.endpoints]]，见下文
 
 [[requires]]                 # 依赖的其他插件
@@ -56,7 +56,7 @@ description = "价格和成交量排名的10日相关系数取反"
 
 清单的权威定义是 `packages/duohelm-sdk/src/duohelm_sdk/manifest.py`。选用 TOML 是因为 Python 标准库自带解析器，SDK 不需要额外依赖。
 
-### 联网地址 `permissions.network`（SDK 0.3.1 起只允许公网）
+### 联网地址 `permissions.network`（SDK 0.4 起只允许公网）
 
 `network` 列出插件要连接的**公网**主机名或公网 IP，可以带端口（`api.example.com`、`1.2.3.4:443`）。
 
@@ -202,15 +202,23 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 
 ### 变更记录
 
-**SDK 0.3.1（M1）**，`permissions.network` 收紧：
+**SDK 0.4.0（M1）**，不兼容：`permissions.network` 的含义收紧。0.3 下有效的清单（`network` 里写了本机或局域网地址）在 0.4 下无效，按“改变含义是不兼容改动”升次版本号：
 
-- `network` 只允许公网地址：解析清单时拒绝本机、私有网段、链路本地、保留地址，以及 `localhost`、`*.local` 等明显指向本机或局域网的主机名，报错信息提示改用 `[[permissions.endpoints]]`
-- 运行时（平台 netguard），`network` 里的主机名解析到本机或私有网段时拦截；整个列表要用户确认后才放行（平台行为，不是 SDK 接口）
+- `network` 只允许公网地址：解析清单时拒绝本机、私有网段、链路本地、保留地址（包括 `127.1`、`0x7f.0.0.1` 这类数字或十六进制写法），以及 `localhost`、`*.localhost`、`*.local`、`*.lan`、`*.internal`、`*.home.arpa`，报错信息提示改用 `[[permissions.endpoints]]`
+- SDK 的接口（`__all__`、协议、数据格式）没有变化
+
+同一版本里平台的行为（不是 SDK 接口，但插件作者需要知道）：
+
+- `network` 的整个列表要用户在插件页确认后才放行，列表变了要重新确认
+- 运行时 netguard 按实际解析出的 IP 检查：`network` 里的主机名解析到本机或私有网段时拦截
+- 没确认过的 endpoint 一律不放行，包括清单的 `default`：`endpoint()` 仍然返回 `default`，但连接会被拦截，直到用户在插件页确认
 
 迁移：
 
-- `network` 里写了本机或局域网地址的插件，改用 `[[permissions.endpoints]]`（例如 xtdata 的 `127.0.0.1:58610` 改为 `miniqmt` endpoint，scope 为 `lan`）。清单的 `sdk` 范围不用改：0.3.1 与 0.3.0 的接口相同，按旧写法声明了私有地址的清单在 0.3.1 上会被判为无效
-- 只写了公网地址的插件不需要改
+- `network` 里写了本机或局域网地址的插件，改用 `[[permissions.endpoints]]`（例如 xtdata 的 `127.0.0.1:58610` 改为 `miniqmt` endpoint，scope 为 `lan`），清单的 `sdk` 写 `">=0.4,<0.5"`
+- `network` 只写了公网地址（或为空）的插件不需要改代码，把清单的 `sdk` 放宽为 `">=0.3,<0.5"` 即可
+- 用 endpoints 的插件：用户确认之前连不上，连接失败时提示用户去插件页确认地址（实现了 `check_connection` 的，在这里返回明确的提示）
+- 官方插件：xtdata 改用 `endpoint("miniqmt")`、实现 `check_connection`，`sdk` 写 `">=0.4,<0.5"`；eltdx 按上面的规则调整 `sdk` 范围。两者在插件仓库单独提 PR
 
 **SDK 0.3.0（M1）**，只有新增，但清单多了字段，旧版平台无法解析（清单不接受未知字段），所以升次版本号：
 

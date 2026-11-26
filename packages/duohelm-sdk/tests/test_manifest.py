@@ -183,7 +183,7 @@ def test_load_manifest_missing_file(tmp_path: Path) -> None:
     ],
 )
 def test_network_rejects_local_and_private(host: str) -> None:
-    """SDK 0.3.1：network 只允许公网地址，本机和局域网的服务走 endpoints。"""
+    """SDK 0.4：network 只允许公网地址，本机和局域网的服务走 endpoints。"""
     message = _error(
         DATASOURCE_PLUGIN.replace(
             'network = ["api.example.com", "data.example.com:8443"]', f'network = ["{host}"]'

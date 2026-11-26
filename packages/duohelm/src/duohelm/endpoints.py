@@ -1,7 +1,7 @@
 """插件的网络权限：清单的 ``permissions.network`` 和用户配置的连接地址
 （``[[permissions.endpoints]]``），都由用户在平台里确认。
 
-network（SDK 0.3.1 起只允许公网地址）：
+network（SDK 0.4 起只允许公网地址）：
 
 - 整个列表由用户确认一次（:meth:`EndpointStore.approve_network`）；确认前插件不能联网
 - 列表的哈希（:func:`network_digest`）变了需要重新确认，重新确认之前插件不能联网

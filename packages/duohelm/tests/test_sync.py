@@ -19,7 +19,7 @@ from duohelm.isolation import Limits, PluginRunError
 from duohelm.registry import PluginRegistry
 from duohelm.settings import Settings
 from duohelm.storage import DataStore, SnapshotConflictError
-from duohelm.tasks import RetryableError, TaskStore, TaskTypeRegistry, Worker
+from duohelm.tasks import RetryableError, TaskStore, TaskTypeRegistry, Worker, delisted
 from duohelm.tasks.sync import SyncParams, SyncResult, data_sync, last_closed_day
 from duohelm.tasks.sync import _plugin_errors as plugin_errors  # pyright: ignore[reportPrivateUsage]
 
@@ -65,6 +65,15 @@ SECURITIES = [
 ]
 
 
+def all_securities():
+    # delist_now：让在市的证券在这次运行里变成已退市
+    changed = B.get("delist_now", {})
+    return [
+        (*row[:5], date.fromisoformat(changed[row[0]])) if row[0] in changed else row
+        for row in SECURITIES
+    ]
+
+
 def record(name):
     with (HERE / "calls.txt").open("a", encoding="utf-8") as f:
         f.write(name + "\\n")
@@ -82,10 +91,20 @@ class Plain:
 
     def securities(self, *, include_delisted=False):
         record(f"securities include_delisted={include_delisted}")
-        return pl.DataFrame(SECURITIES, schema=SECURITIES_SCHEMA, orient="row")
+        rows = all_securities()
+        if not include_delisted:
+            rows = [r for r in rows if r[5] is None]
+        return pl.DataFrame(rows, schema=SECURITIES_SCHEMA, orient="row")
 
     def lookup_securities(self, symbols):
-        raise NotImplementedError
+        record(f"lookup {','.join(symbols)}")
+        if B.get("lookup_fail") in symbols:
+            raise RuntimeError("lookup 出错")
+        lost = set(B.get("lookup_loses", []))
+        rows = [r for r in all_securities() if r[0] in symbols and r[0] not in lost]
+        if B.get("lookup_extra"):
+            rows += [r for r in all_securities() if r[0] == "600000.SH" and r[0] not in symbols]
+        return pl.DataFrame(rows, schema=SECURITIES_SCHEMA, orient="row")
 
     def trading_calendar(self, market, start, end):
         record(f"trading_calendar {market}")
@@ -144,6 +163,12 @@ source = Broken() if B.get("broken_check") else Checked() if B.get("check", True
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(home=tmp_path / "home")
+
+
+def behave(plugin: Path, **behavior: Any) -> None:
+    """改变插件下一次运行的行为（每次运行都启动新的子进程，重新读取）。"""
+    (plugin / "behavior.json").write_text(json.dumps(behavior), encoding="utf-8")
+    (plugin / "calls.txt").unlink(missing_ok=True)
 
 
 def install(settings: Settings, **behavior: Any) -> Path:
@@ -335,14 +360,139 @@ def test_non_callable_check_connection_fails(settings: Settings) -> None:
     assert "capabilities" not in calls(plugin)
 
 
-def test_source_without_delisted_list_is_refused(settings: Settings) -> None:
-    """不能列出退市证券的数据源暂不同步：只同步在市证券会有幸存者偏差。"""
+# ---- 退市股扫描（lists_delisted 为 False 的数据源，#30）----
+
+SMALL_RANGES = (("SH", 600000, 600009), ("SZ", 1, 3))
+"""13 个代码：在市的 600000.SH、000001.SZ，退市的 600001.SH（2009）、600005.SH（2024-01-03）。"""
+
+
+@pytest.fixture
+def small_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(delisted, "SCAN_RANGES", SMALL_RANGES)
+    monkeypatch.setattr(delisted, "SCAN_BATCH", 5)
+
+
+def lookups(plugin: Path) -> list[str]:
+    return [c.removeprefix("lookup ") for c in calls(plugin) if c.startswith("lookup ")]
+
+
+def test_scan_finds_delisted_securities(settings: Settings, small_scan: None) -> None:
+    """代码表只有在市证券：扫描代码区间找到退市股，结果和能直接列出退市证券时一样。"""
     plugin = install(settings, lists_delisted=False)
     confirm(settings)
     store, task_id = run(settings)
-    assert "幸存者偏差" in failed(store, task_id)
-    assert calls(plugin) == ["check_connection", "check_connection 127.0.0.1:58612", "capabilities"]
+    result = result_of(store, task_id)
+
+    assert "securities include_delisted=False" in calls(plugin)
+    assert "securities include_delisted=True" not in calls(plugin)
+    # 代码表里的 600000.SH、000001.SZ 不用再扫；其余 11 个每 5 个一批
+    scanned = [s for batch in lookups(plugin) for s in batch.split(",")]
+    assert len(scanned) == 11
+    assert "600000.SH" not in scanned and "000001.SZ" not in scanned
+    assert (result.scanned, result.rechecked) == (11, 0)
+
+    data = DataStore(settings.data_dir)
+    securities = {r["symbol"]: r for r in data.read("securities").iter_rows(named=True)}
+    assert securities["600001.SH"]["delist_date"] == date(2009, 12, 25)
+    assert securities["600005.SH"]["delist_date"] == date(2024, 1, 3)
+    assert result.securities == 5 and result.symbols == 4
+    # 区间内退市的 600005.SH 有日线
+    bars = data.read("bars_1d")
+    assert bars.filter(pl.col("symbol") == "600005.SH").height == 2
+    summary = data.catalog.scan_summary("fake-src")
+    assert summary["scanned"] >= 13
+    assert {"600001.SH", "600005.SH"} <= set(data.catalog.found_symbols("fake-src"))
+
+
+def test_scan_is_not_repeated_and_delisted_are_rechecked(
+    settings: Settings, small_scan: None
+) -> None:
+    """扫过的代码不再扫；扫到过但不在代码表里的，每次都重新查询。"""
+    plugin = install(settings, lists_delisted=False)
+    confirm(settings)
+    run(settings)
+    behave(plugin, lists_delisted=False)
+    store, task_id = run(settings)
+    result = result_of(store, task_id)
+    assert (result.scanned, result.rechecked) == (0, 2)
+    assert lookups(plugin) == ["600001.SH,600005.SH"]
+    assert result.snapshot_id is None  # 数据没有变化
+
+
+def test_newly_delisted_security_is_found(settings: Settings, small_scan: None) -> None:
+    """上次还在代码表里、这次不在了：重新查询，写入退市日期。"""
+    plugin = install(settings, lists_delisted=False)
+    confirm(settings)
+    run(settings)
+    behave(plugin, lists_delisted=False, delist_now={"600000.SH": "2024-01-04"})
+    store, task_id = run(settings)
+    result = result_of(store, task_id)
+    assert "600000.SH" in lookups(plugin)[0]
+    securities = DataStore(settings.data_dir).read("securities")
+    row = securities.filter(pl.col("symbol") == "600000.SH").row(0, named=True)
+    assert row["delist_date"] == date(2024, 1, 4)
+    assert result.rechecked == 3
+
+
+def test_previously_found_code_missing_fails(settings: Settings, small_scan: None) -> None:
+    """之前扫到过、这次查不到：不知道，不能当成没有这只证券，任务失败。"""
+    plugin = install(settings, lists_delisted=False)
+    confirm(settings)
+    store, first = run(settings)
+    head = result_of(store, first).snapshot_id
+    behave(plugin, lists_delisted=False, lookup_loses=["600001.SH"])
+    store, task_id = run(settings)
+    assert "查不到" in failed(store, task_id)
+    assert DataStore(settings.data_dir).head() == head
+
+
+def test_failed_scan_resumes_where_it_stopped(settings: Settings, small_scan: None) -> None:
+    """扫描中途失败：已经扫完的批次记下来，下次从没扫过的代码接着扫；失败时不写快照。"""
+    plugin = install(settings, lists_delisted=False, lookup_fail="600008.SH")
+    confirm(settings)
+    store, task_id = run(settings)
+    failed(store, task_id)
+    data = DataStore(settings.data_dir)
+    assert data.head() is None
+    done = [s for batch in lookups(plugin)[:-1] for s in batch.split(",")]
+    assert len(done) == 5  # 第一批扫完，第二批（含 600008.SH）出错
+
+    behave(plugin, lists_delisted=False)
+    store, task_id = run(settings)
+    result = result_of(store, task_id)
+    assert result.scanned == 11 - 5
+    *scan_batches, recheck = lookups(plugin)
+    assert recheck == "600001.SH,600005.SH"  # 第一批找到的退市股，重新查询
+    second = {s for batch in scan_batches for s in batch.split(",")}
+    assert len(second) == 6 and not second & set(done)
+    assert data.head() == result.snapshot_id
+
+
+def test_lookup_returning_unrequested_code_fails(settings: Settings, small_scan: None) -> None:
+    install(settings, lists_delisted=False, lookup_extra=True)
+    confirm(settings)
+    store, task_id = run(settings)
+    assert "没有查询的代码" in failed(store, task_id)
     assert DataStore(settings.data_dir).head() is None
+
+
+def test_scan_ranges_cover_a_shares_and_bj() -> None:
+    symbols = delisted.scan_symbols()
+    assert len(symbols) == len(set(symbols)) == 6000 + 2000 + 4999 + 2000 + 1000
+    for symbol in [
+        "600000.SH",
+        "605999.SH",
+        "688981.SH",
+        "000001.SZ",
+        "002594.SZ",
+        "003816.SZ",
+        "300750.SZ",
+        "301999.SZ",
+        "920000.BJ",
+    ]:
+        assert symbol in symbols
+    assert "000000.SZ" not in symbols
+    assert "900901.SH" not in symbols  # 不含 B 股
 
 
 def test_unknown_plugin_fails(settings: Settings) -> None:

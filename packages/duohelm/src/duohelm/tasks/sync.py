@@ -5,8 +5,8 @@
 - 插件经 :func:`duohelm.isolation.session_for` 在隔离进程里运行，带上用户在插件页确认过的
   连接地址（#24）。没确认的 endpoint，插件拿不到地址
 - 开始时先调用插件的 ``check_connection``（如果实现了）；没通过就直接失败，不进入下载
-- 不能直接列出退市证券的数据源（``lists_delisted`` 为 False）暂不同步：退市股扫描还没有
-  实现，只同步在市证券会有幸存者偏差
+- 证券列表必须包含退市证券，否则回测有幸存者偏差。``lists_delisted`` 为 False 的数据源
+  先按代码区间扫描退市股（:mod:`duohelm.tasks.delisted`，#30），扫完才继续
 - 入库前按 SDK 的契约检查格式；成交量为 0 的行（停牌占位）丢弃
 - 只同步已收盘的日子：盘中的日线不是最终值，不能进快照
 - 全部数据在一个事务里写入，成功才提交为一个快照；失败、取消时不留下半个快照。重复执行
@@ -29,6 +29,7 @@ from duohelm.isolation.runner import Limits, PluginRunError, PluginSession, sess
 from duohelm.registry import PluginEntry, PluginRegistry, PluginStatus
 from duohelm.settings import Settings
 from duohelm.storage import DataStore, SnapshotConflictError
+from duohelm.tasks.delisted import discover_securities
 from duohelm.tasks.types import (
     RetryableError,
     TaskCancelled,
@@ -90,6 +91,10 @@ class SyncResult(BaseModel):
     """各数据集实际写入（新增或变化）的行数。"""
     dropped_zero_volume: int
     """丢弃的成交量为 0 的行数。"""
+    scanned: int = 0
+    """退市股扫描：这次新扫描的代码数。能直接列出退市证券的数据源为 0。"""
+    rechecked: int = 0
+    """退市股扫描：这次重新查询的、扫到过但不在代码表里的代码数。"""
 
 
 def _beijing_now() -> datetime:
@@ -182,11 +187,21 @@ def _run(
     ctx.progress(0.0, "检查连接")
     connection = check_connection(session, addresses)
     ctx.log(connection if connection is not None else "插件没有实现 check_connection，跳过")
-    check_capabilities(plugin_id, session.call("capabilities"))
+    caps = check_capabilities(plugin_id, session.call("capabilities"))
 
     ctx.progress(0.01, "证券列表")
-    securities = fetch_securities(session)
-    ctx.progress(0.02, "交易日历")
+    scanned = rechecked = 0
+    if caps.lists_delisted:
+        securities = fetch_securities(session)
+        base = 0.02
+    else:
+        scan = discover_securities(
+            ctx, session, data.catalog, progress=lambda f, m: ctx.progress(0.01 + 0.29 * f, m)
+        )
+        securities = known_securities(scan.securities).sort("symbol")
+        scanned, rechecked = scan.scanned, scan.rechecked
+        base = 0.3
+    ctx.progress(base, "交易日历")
     calendar = fetch_calendar(session, start, end)
     symbols = symbols_in_range(securities, start, end)
     ctx.log(
@@ -205,7 +220,7 @@ def _run(
             written["calendar"] = tx.write("calendar", calendar)
             for i, batch in enumerate(batches):
                 ctx.progress(
-                    0.03 + 0.96 * i / len(batches),
+                    base + 0.01 + (0.98 - base) * i / len(batches),
                     f"日线和复权因子：{i * BATCH_SIZE}/{len(symbols)}",
                 )
                 bars, zero = fetch_bars(session, batch, start, end)
@@ -231,6 +246,8 @@ def _run(
         symbols=len(symbols),
         written=written,
         dropped_zero_volume=dropped,
+        scanned=scanned,
+        rechecked=rechecked,
     )
 
 
@@ -270,11 +287,6 @@ def check_capabilities(plugin_id: str, caps: Any) -> Capabilities:
         raise SyncError(f"插件 {plugin_id} 不支持 {MARKET} 市场（支持 {list(caps.markets)}）")
     if Freq.DAY not in caps.freqs:
         raise SyncError(f"插件 {plugin_id} 不提供日线")
-    if not caps.lists_delisted:
-        raise SyncError(
-            f"插件 {plugin_id} 不能直接列出退市证券（lists_delisted 为 False）。这类数据源需要"
-            "扫描代码区间发现退市股，平台还没有实现；只同步在市证券会有幸存者偏差，所以暂不同步"
-        )
     return caps
 
 

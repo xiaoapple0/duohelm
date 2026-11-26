@@ -17,7 +17,7 @@ from typing import Any
 
 from duohelm.tasks.store import Clock, check_sqlite_version, now_ms, to_datetime
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 5_000
 HEAD = "main"
 
@@ -45,6 +45,19 @@ CREATE TABLE security_scan (
   symbol     TEXT PRIMARY KEY,
   found      INTEGER NOT NULL,
   scanned_at INTEGER NOT NULL
+);
+"""
+
+# v2：扫描记录按数据源分开。一个数据源没有某个代码，不代表别的数据源也没有（#30）。
+# v1 的表没有任何代码写过，但仍改名保留，不删除。
+_SCHEMA_V2 = """
+ALTER TABLE security_scan RENAME TO security_scan_v1;
+CREATE TABLE security_scan (
+  source     TEXT NOT NULL,
+  symbol     TEXT NOT NULL,
+  found      INTEGER NOT NULL,
+  scanned_at INTEGER NOT NULL,
+  PRIMARY KEY (source, symbol)
 );
 """
 
@@ -109,10 +122,11 @@ class Catalog:
                 raise RuntimeError(
                     f"数据目录库版本 {version} 高于本程序支持的 {SCHEMA_VERSION}，请升级 DuoHelm"
                 )
-            if version < 1:
-                for statement in _SCHEMA_V1.split(";"):
-                    if statement.strip():
-                        conn.execute(statement)
+            for target, script in ((1, _SCHEMA_V1), (2, _SCHEMA_V2)):
+                if version < target:
+                    for statement in script.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # ---- 快照 ----
@@ -204,35 +218,49 @@ class Catalog:
         with self._connect() as conn:
             return {str(r[0]) for r in conn.execute("SELECT DISTINCT snapshot_id FROM pins")}
 
-    # ---- 退市股扫描记录：扫过的代码不再重复扫描 ----
+    # ---- 退市股扫描记录：按数据源记录，扫过的代码不再重复扫描 ----
 
-    def record_scan(self, results: Iterable[tuple[str, bool]]) -> None:
+    def record_scan(self, source: str, results: Iterable[tuple[str, bool]]) -> None:
+        """记下数据源 source 有没有这些代码。扫到过（found）的不会再改回没扫到。"""
         now = self._clock()
         with self._write() as conn:
             conn.executemany(
-                "INSERT INTO security_scan (symbol, found, scanned_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(symbol) DO UPDATE SET found = excluded.found, "
-                "scanned_at = excluded.scanned_at",
-                [(symbol, int(found), now) for symbol, found in results],
+                "INSERT INTO security_scan (source, symbol, found, scanned_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(source, symbol) DO UPDATE SET "
+                "found = MAX(found, excluded.found), scanned_at = excluded.scanned_at",
+                [(source, symbol, int(found), now) for symbol, found in results],
             )
 
-    def unscanned(self, symbols: Sequence[str]) -> list[str]:
-        """symbols 中还没有扫描过的代码，保持原顺序。"""
+    def unscanned(self, source: str, symbols: Sequence[str]) -> list[str]:
+        """symbols 中数据源 source 还没有扫描过的代码，保持原顺序。"""
         with self._connect() as conn:
             conn.execute("CREATE TEMP TABLE want (symbol TEXT PRIMARY KEY)")
             conn.executemany("INSERT OR IGNORE INTO want VALUES (?)", [(s,) for s in symbols])
             done = {
                 str(r[0])
                 for r in conn.execute(
-                    "SELECT w.symbol FROM want w JOIN security_scan s ON s.symbol = w.symbol"
+                    "SELECT w.symbol FROM want w JOIN security_scan s "
+                    "ON s.symbol = w.symbol AND s.source = ?",
+                    (source,),
                 )
             }
         return [s for s in symbols if s not in done]
 
-    def scan_summary(self) -> dict[str, int]:
+    def found_symbols(self, source: str) -> list[str]:
+        """数据源 source 扫到过（或在代码表里出现过）的代码，按代码排序。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT symbol FROM security_scan WHERE source = ? AND found = 1 ORDER BY symbol",
+                (source,),
+            )
+            return [str(r[0]) for r in rows]
+
+    def scan_summary(self, source: str) -> dict[str, int]:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) AS scanned, COALESCE(SUM(found), 0) AS found FROM security_scan"
+                "SELECT COUNT(*) AS scanned, COALESCE(SUM(found), 0) AS found "
+                "FROM security_scan WHERE source = ?",
+                (source,),
             ).fetchone()
         return {"scanned": int(row["scanned"]), "found": int(row["found"])}
 

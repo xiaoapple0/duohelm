@@ -31,8 +31,17 @@
 ## 时间线摘要
 
 - 2026-11-25：CI 必需检查配置错误，PR 合并一直等待
+- 2026-11-26：Claude 桌面应用（MSIX）把写入 %APPDATA% 的内容重定向到私有目录，uv sync 失败，被误判为沙箱拦截
 
 ## 已发现的教训
+
+### 开发环境
+
+**需要持久保存、或要在 Claude 桌面应用之外访问的数据，放在用户主目录下，不放 %APPDATA%。**
+- 原因：Claude 桌面应用是 MSIX 包。它启动的进程（包括 agent 运行的命令）写入 %APPDATA% 的内容，会被重定向到 `%LOCALAPPDATA%\Packages\AnthropicPBC.Claude_*\LocalCache\Roaming`。在应用外面看不到这些内容；有些工具在应用里面也会出错，比如 uv 检查目录联接时，看到的是未经重定向的路径。报错表面上像是文件缺失或权限问题，容易被误判。
+- 怎么做：工具的安装目录、缓存、需要长期保留的数据，用环境变量或参数指到用户主目录下（例如 `UV_PYTHON_INSTALL_DIR=C:\Users\<用户>\.uv-python`）。看到 %APPDATA% 下的路径报“不存在”，先用 PowerShell 的 `Get-Item -Force <路径> | Select-Object Target` 查看它实际被重定向到了哪里。
+- 证据：2026-11-26 #19：uv 把 Python 3.12.16 装在 `%APPDATA%\uv\python`，实际被重定向到了应用的私有目录；uv 建的 `cpython-3.12` 目录联接找不到目标，`uv sync` 报 “Missing expected target directory for Python minor version link”。agent 当成沙箱拦截停了下来。维护者设置用户级环境变量 `UV_PYTHON_INSTALL_DIR` 指向用户主目录后，两个仓库的 `uv sync` 和全量测试都恢复正常。
+- 出现次数：1（2026-11-26）
 
 ### CI 与仓库设置
 

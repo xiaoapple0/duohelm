@@ -149,7 +149,7 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 - 子进程启动时先复制 fd 1 留给协议，再把 fd 1 重定向到 stderr，插件的 `print` 和原生库输出都不会破坏协议
 - stderr 作为插件日志转给调用方，每次会话最多 256 KiB，超出部分丢弃，并记一条说明
 - 数据表用 Arrow IPC 文件在会话临时目录里传递。读取时先把整个文件读进内存再解析，不做内存映射，读完立即删除文件（Windows 上被映射的文件删不掉）
-- 子进程只接受规定的方法：因子插件只有 `compute`，行情源插件只有协议里的五个方法。交易接口插件和算子插件不能单独在隔离进程里运行：算子只在依赖它的因子插件的子进程里加载，算子返回的 polars 表达式永远不跨进程
+- 子进程只接受规定的方法：因子插件只有 `compute`，行情源插件只有 `DataSourcePlugin` 协议里的方法，加上可选的 `check_connection`（SDK 0.3）。交易接口插件和算子插件不能单独在隔离进程里运行：算子只在依赖它的因子插件的子进程里加载，算子返回的 polars 表达式永远不跨进程
 - 平台在发出 `start` 之后，子进程才导入插件代码；在此之前已经完成 fd 重定向、网络拦截，以及（Windows 上）加入 Job。`start` 消息带上网络白名单（`network`）和 endpoint 地址（`endpoints`），子进程先按它们设置好，再导入插件
 
 ### 错误分类（`PluginRunError.reason`）

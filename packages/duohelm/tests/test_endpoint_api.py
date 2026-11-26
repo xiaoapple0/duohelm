@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -13,15 +14,14 @@ for _module in ("fastapi", "httpx"):
     else:
         pytest.importorskip(_module)
 
-from collections.abc import Callable
-
-MakePlugin = Callable[..., Path]
 from fastapi.testclient import TestClient
 
 from duohelm.api import create_app
 from duohelm.endpoints import EndpointStore
 from duohelm.settings import Settings
 from duohelm_sdk import parse_manifest
+
+MakePlugin = Callable[..., Path]  # 与 conftest 的 make_plugin 夹具一致
 
 MANIFEST = """
 [plugin]

@@ -13,6 +13,9 @@ xtquant 的 C 扩展连接 MiniQMT）。威胁模型见 docs/subsystems/plugins.
 - 解析主机名：主机名必须在白名单里；解析出来的 IP 记下来，之后连接这些 IP（按主机名那一项
   的端口规则）也放行
 - 其他一律拒绝：反向解析、Unix 套接字、``sendmsg``，以及白名单为空时的一切网络访问
+- Windows 上 asyncio 默认的 Proactor 事件循环用 ``ConnectEx`` 直接发起连接，不经过
+  ``socket.connect``；``IocpProactor.connect`` 和 ``sendto`` 也按同样的规则拦截
+  （2026-11-26 实测：不拦截时 ``asyncio.open_connection`` 能连上任意 IP）
 
 ``socket.socketpair()`` 例外：asyncio 等在 Windows 上用它在本机建一对互联的套接字做
 内部唤醒，它不访问网络。
@@ -22,6 +25,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import sys
 import threading
 from collections.abc import Callable, Iterable
 from typing import Any, cast
@@ -164,6 +168,31 @@ def _check_lookup(host: object, port: object = None) -> None:
 _installed = False
 
 
+def _guard_proactor() -> None:
+    """Windows 上 asyncio 的 IocpProactor 不经过 socket.connect / sendto，单独拦截。"""
+    # 直接写 sys.platform 判断：pyright 只认这种写法，在 Linux / macOS 上跳过这段代码。
+    if sys.platform != "win32":
+        return
+    from asyncio import windows_events  # noqa: PLC0415  只在 Windows 上存在
+
+    proactor: Any = windows_events.IocpProactor
+    original_connect = proactor.connect
+    original_sendto = proactor.sendto
+
+    def connect(self: Any, conn: Any, address: Any) -> Any:
+        if not _passthrough():
+            _check_address(address)
+        return original_connect(self, conn, address)
+
+    def sendto(self: Any, conn: Any, buf: Any, flags: int = 0, addr: Any = None) -> Any:
+        if addr is not None and not _passthrough():
+            _check_address(addr)
+        return original_sendto(self, conn, buf, flags, addr)
+
+    proactor.connect = connect
+    proactor.sendto = sendto
+
+
 def set_allowlist(allowed: Iterable[str]) -> None:
     """设置白名单。子进程收到 ``start`` 后、导入插件代码之前调用一次。"""
     global _allow  # noqa: PLW0603  进程级设置
@@ -218,6 +247,9 @@ def install(allowed: Iterable[str] = ()) -> None:
     socket.gethostbyname_ex = gethostbyname_ex
     socket.create_connection = create_connection
     socket.gethostbyaddr = _refuse_always("gethostbyaddr")
+
+    if sys.platform == "win32":
+        _guard_proactor()
 
     original_socketpair = socket.socketpair
 

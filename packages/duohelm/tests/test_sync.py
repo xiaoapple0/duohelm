@@ -68,8 +68,10 @@ SECURITIES = [
 def all_securities():
     # delist_now：让在市的证券在这次运行里变成已退市
     changed = B.get("delist_now", {})
+    names = B.get("names", {})
     return [
-        (*row[:5], date.fromisoformat(changed[row[0]])) if row[0] in changed else row
+        (row[0], names.get(row[0], row[1]), *row[2:5],
+         date.fromisoformat(changed[row[0]]) if row[0] in changed else row[5])
         for row in SECURITIES
     ]
 
@@ -109,7 +111,9 @@ class Plain:
 
     def trading_calendar(self, market, start, end):
         record(f"trading_calendar {market}")
-        return pl.DataFrame({"date": [d for d in CALENDAR if start <= d <= end]})
+        return pl.DataFrame(
+            {"date": [d for d in CALENDAR if start <= d <= end]}, schema={"date": pl.Date}
+        )
 
     def bars(self, symbols, freq, start, end):
         record(f"bars {','.join(symbols)}")
@@ -139,7 +143,23 @@ class Plain:
         return pl.DataFrame(rows, schema=ADJ_FACTORS_SCHEMA, orient="row")
 
     def index_constituents(self, index, start, end):
-        raise NotImplementedError
+        record(f"index_constituents {index} {start} {end}")
+        spec = B.get("index_members")
+        if B.get("index_crash"):
+            import os
+            os._exit(3)
+        if index in B.get("index_raise", []):
+            raise RuntimeError("boom")
+        if spec is None:
+            raise NotImplementedError
+        schema = {"symbol": pl.String, "in_date": pl.Date, "out_date": pl.Date}
+        if B.get("bad_index_format"):
+            return pl.DataFrame({"symbol": ["600000.SH"]})
+        rows = [
+            (s, date.fromisoformat(i) if i else None, date.fromisoformat(o) if o else None)
+            for s, i, o in spec.get(index, [])
+        ]
+        return pl.DataFrame(rows, schema=schema, orient="row")
 
 
 class Checked(Plain):
@@ -274,7 +294,11 @@ def test_sync_uses_confirmed_address_and_writes_snapshot(settings: Settings) -> 
         "calendar": 4,
         "bars_1d": 13,
         "adj_factors": 2,
+        "st_daily": 0,  # end 早于最近一个已收盘的日子，不写快照
+        "index_members_daily": 0,
     }
+    assert result.snapshot_date is None and result.snapshot_skipped is not None
+    assert data.read("st_daily").height == 0
     quality = dict(data.read("delist_date_quality").rows())
     assert quality == {
         "000001.SH": None,
@@ -690,3 +714,318 @@ def test_explicit_unclosed_end_fails(settings: Settings) -> None:
     store, task_id = run_at(settings, beijing(5, 10), end="2024-01-05")
     assert "还没有收盘" in failed(store, task_id)
     assert calls(plugin) == []
+
+
+# ---- ST 名单和指数成分快照（#43）----
+
+CLOSE_DAY = beijing(5, 16)  # 2024-01-05（星期五）收盘后：最近已收盘的交易日是这一天
+INDEXES = ["000300.SH", "000905.SH"]
+MEMBERS = {
+    "000300.SH": [
+        ("600000.SH", "1999-11-10", None),
+        ("000001.SZ", "2010-01-04", None),
+        ("600001.SH", "2000-01-01", "2009-12-25"),  # 早已调出
+        ("600005.SH", "2024-01-08", None),  # 快照日期时还没调入
+        ("000002.SZ", None, "2024-01-09"),  # 已宣布的调出日在快照日期之后：当天仍是成分
+    ],
+}
+
+
+def snapshot_rows(settings: Settings, dataset: str) -> list[tuple[Any, ...]]:
+    return DataStore(settings.data_dir).read(dataset).rows()
+
+
+def test_snapshots_written_at_close_in_same_transaction(settings: Settings) -> None:
+    plugin = install(settings)
+    behave(plugin, names={"000001.SZ": "*ST平安", "600000.SH": "浦发ST"}, index_members=MEMBERS)
+    confirm(settings)
+    store, task_id = run_at(settings, CLOSE_DAY, indexes=INDEXES)
+    result = result_of(store, task_id)
+
+    assert result.snapshot_date == date(2024, 1, 5) and result.snapshot_skipped is None
+    # 只有名称前缀是 ST 的算；名称中间含 ST 的不算；退市的、指数不在名单里
+    assert snapshot_rows(settings, "st_daily") == [(date(2024, 1, 5), "000001.SZ", "*ST平安", "st")]
+    assert snapshot_rows(settings, "index_members_daily") == [
+        (date(2024, 1, 5), "000300.SH", "000001.SZ"),
+        (date(2024, 1, 5), "000300.SH", "000002.SZ"),
+        (date(2024, 1, 5), "000300.SH", "600000.SH"),
+    ]
+    # 000905.SH 插件没有返回成分：未知，不写成空名单，原因写进结果
+    assert list(result.index_snapshot_failed) == ["000905.SH"]
+    assert "为空" in result.index_snapshot_failed["000905.SH"]
+    assert result.written["st_daily"] == 1 and result.written["index_members_daily"] == 3
+    # 与日线等在同一个快照里
+    data = DataStore(settings.data_dir)
+    assert result.snapshot_id is not None
+    for dataset in ("bars_1d", "st_daily", "index_members_daily"):
+        assert data.read(dataset, snapshot=result.snapshot_id).height > 0
+    assert "index_constituents 000300.SH 2024-01-05 2024-01-05" in calls(plugin)
+
+
+def test_default_indexes_are_requested(settings: Settings) -> None:
+    plugin = install(settings)
+    behave(plugin, index_members=MEMBERS)
+    confirm(settings)
+    store, task_id = run_at(settings, CLOSE_DAY)
+    result_of(store, task_id)
+    asked = [c.split()[1] for c in calls(plugin) if c.startswith("index_constituents")]
+    assert asked == [
+        "000300.SH",
+        "000905.SH",
+        "000852.SH",
+        "000016.SH",
+        "399006.SZ",
+        "000688.SH",
+    ]
+
+
+def test_empty_indexes_param_skips_members(settings: Settings) -> None:
+    plugin = install(settings)
+    confirm(settings)
+    store, task_id = run_at(settings, CLOSE_DAY, indexes=[])
+    result = result_of(store, task_id)
+    assert not [c for c in calls(plugin) if c.startswith("index_constituents")]
+    assert result.index_snapshot_failed == {} and result.snapshot_date == date(2024, 1, 5)
+
+
+@pytest.mark.parametrize("behavior", [{}, {"bad_index_format": True}])
+def test_index_failure_is_unknown_not_empty(settings: Settings, behavior: dict[str, Any]) -> None:
+    """index_constituents 抛 NotImplementedError（插件错误）、返回格式不对：不写成分，不写空名单，
+    同步照常成功。方法根本不存在（unsupported）的情形见 test_snapshots.py 的假会话测试。"""
+    plugin = install(settings)
+    behave(plugin, names={"000001.SZ": "ST平安"}, **behavior)
+    confirm(settings)
+    store, task_id = run_at(settings, CLOSE_DAY, indexes=["000300.SH"])
+    result = result_of(store, task_id)
+    assert list(result.index_snapshot_failed) == ["000300.SH"]
+    assert snapshot_rows(settings, "index_members_daily") == []
+    assert snapshot_rows(settings, "st_daily") == [(date(2024, 1, 5), "000001.SZ", "ST平安", "st")]
+    assert DataStore(settings.data_dir).read("bars_1d").height > 0
+    warnings = [log.message for log in store.logs(task_id) if log.level == "warning"]
+    assert any("000300.SH" in m for m in warnings)
+
+
+def test_no_snapshot_when_end_is_before_last_closed_day(settings: Settings) -> None:
+    """回补历史：今天的名单不能当成过去的名单。"""
+    plugin = install(settings)
+    behave(plugin, names={"000001.SZ": "*ST平安"}, index_members=MEMBERS)
+    confirm(settings)
+    store, task_id = run_at(settings, CLOSE_DAY, end="2024-01-04", indexes=INDEXES)
+    result = result_of(store, task_id)
+    assert result.snapshot_date is None and "早于" in (result.snapshot_skipped or "")
+    assert snapshot_rows(settings, "st_daily") == []
+    assert snapshot_rows(settings, "index_members_daily") == []
+    assert not [c for c in calls(plugin) if c.startswith("index_constituents")]
+    assert DataStore(settings.data_dir).read("bars_1d").height > 0
+
+
+def test_backfill_does_not_touch_existing_snapshots(settings: Settings) -> None:
+    plugin = install(settings)
+    behave(plugin, names={"000001.SZ": "*ST平安"})
+    confirm(settings)
+    result_of(*run_at(settings, CLOSE_DAY, indexes=[]))
+    before = snapshot_rows(settings, "st_daily")
+    behave(plugin, names={"000001.SZ": "平安银行"})  # 之后名称变了
+    result_of(*run_at(settings, CLOSE_DAY, end="2024-01-04", indexes=[]))
+    assert snapshot_rows(settings, "st_daily") == before
+
+
+def test_weekend_run_writes_no_snapshot_and_keeps_friday(settings: Settings) -> None:
+    """北京时间 1 月 6 日（星期六）16:00：最近已收盘的日子是周六，不是交易日：不写快照，
+    也不动周五已有的快照。"""
+    plugin = install(settings)
+    behave(plugin, names={"000001.SZ": "ST平安"})
+    confirm(settings)
+    result_of(*run_at(settings, CLOSE_DAY, indexes=[]))
+    before = snapshot_rows(settings, "st_daily")
+    behave(plugin, names={"000001.SZ": "平安银行"})
+    result = result_of(*run_at(settings, beijing(6, 16), indexes=[]))
+    assert result.end == date(2024, 1, 6) and result.snapshot_date is None
+    assert "不是交易日" in (result.snapshot_skipped or "")
+    assert snapshot_rows(settings, "st_daily") == before
+
+
+def test_snapshot_date_uses_shanghai_time_not_local_time(settings: Settings) -> None:
+    """机器在美东（UTC-5）：本机时间 1 月 5 日 03:00 是北京时间 16:00，快照日期是 1 月 5 日。
+    按本机时间算会得到 1 月 4 日。"""
+    plugin = install(settings)
+    behave(plugin, names={"000001.SZ": "ST平安"})
+    confirm(settings)
+    new_york = datetime(2024, 1, 5, 3, 0, tzinfo=timezone(timedelta(hours=-5)))
+    result = result_of(*run_at(settings, new_york, indexes=[]))
+    assert result.snapshot_date == date(2024, 1, 5)
+    assert snapshot_rows(settings, "st_daily") == [(date(2024, 1, 5), "000001.SZ", "ST平安", "st")]
+
+
+def test_pre_open_run_does_not_overwrite_previous_day(settings: Settings) -> None:
+    """1 月 5 日（周五）16:00 同步一次；1 月 8 日（周一）09:00（最近已收盘的是周日）、
+    1 月 9 日（周二）09:00（最近已收盘的是周一，但名单已是周二的）盘前运行，名称已经变了：
+    周五的行不变，周一周二没写。"""
+    plugin = install(settings)
+    behave(plugin, names={"000001.SZ": "ST平安"}, index_members=MEMBERS)
+    confirm(settings)
+    result_of(*run_at(settings, CLOSE_DAY, indexes=INDEXES))
+    st_before = snapshot_rows(settings, "st_daily")
+    members_before = snapshot_rows(settings, "index_members_daily")
+    assert st_before and members_before
+
+    behave(plugin, names={"000001.SZ": "平安银行", "600000.SH": "ST浦发"}, index_members={})
+    for clock in (beijing(8, 9), beijing(9, 9, 0)):  # 周一 09:00、周二 09:00
+        result = result_of(*run_at(settings, clock, indexes=INDEXES))
+        assert result.snapshot_date is None and "收盘前" in (result.snapshot_skipped or "")
+        assert snapshot_rows(settings, "st_daily") == st_before
+        assert snapshot_rows(settings, "index_members_daily") == members_before
+
+
+def test_pre_open_run_on_trading_day_after_trading_day(settings: Settings) -> None:
+    """1 月 4 日（周四）16:00 写了快照；1 月 5 日 09:00 运行时最近已收盘的日子 1 月 4 日
+    是交易日，但名单是 1 月 5 日开盘前的：不写。"""
+    plugin = install(settings)
+    behave(plugin, names={"000001.SZ": "ST平安"})
+    confirm(settings)
+    result_of(*run_at(settings, beijing(4, 16), indexes=[]))
+    before = snapshot_rows(settings, "st_daily")
+    assert before[0][0] == date(2024, 1, 4)
+    behave(plugin, names={})
+    result = result_of(*run_at(settings, beijing(5, 9), indexes=[]))
+    assert result.snapshot_date is None
+    assert snapshot_rows(settings, "st_daily") == before
+
+
+def test_unknown_st_status_is_persisted_and_not_deleted(settings: Settings) -> None:
+    """名称拿不到的股票写成 unknown（不是不写）；同一天重复同步时名称又拿不到，
+    已有的 ST 行保持不变，不被改成 unknown 也不被删除。"""
+    plugin = install(settings)
+    behave(plugin, names={"000001.SZ": "*ST平安", "600000.SH": "浦发银行"})
+    confirm(settings)
+    result_of(*run_at(settings, CLOSE_DAY, indexes=[]))
+    assert snapshot_rows(settings, "st_daily") == [(date(2024, 1, 5), "000001.SZ", "*ST平安", "st")]
+
+    behave(plugin, names={"000001.SZ": "", "600000.SH": ""})  # 这次两只都拿不到名称
+    # 全部为空整个 ST 快照不写：原来的行不动
+    result = result_of(*run_at(settings, CLOSE_DAY, indexes=[]))
+    assert result.st_snapshot_failed is not None
+    assert snapshot_rows(settings, "st_daily") == [(date(2024, 1, 5), "000001.SZ", "*ST平安", "st")]
+
+    behave(plugin, names={"000001.SZ": "", "600000.SH": "ST浦发"})  # 只有一只拿不到
+    result = result_of(*run_at(settings, CLOSE_DAY, indexes=[]))
+    assert result.st_unknown_names == 1
+    assert snapshot_rows(settings, "st_daily") == [
+        (date(2024, 1, 5), "000001.SZ", "*ST平安", "st"),  # 保持原来知道的
+        (date(2024, 1, 5), "600000.SH", "ST浦发", "st"),
+    ]
+
+
+def test_unknown_st_status_is_written_on_first_snapshot(settings: Settings) -> None:
+    plugin = install(settings)
+    behave(plugin, names={"000001.SZ": "", "600000.SH": "ST浦发"})
+    confirm(settings)
+    result = result_of(*run_at(settings, CLOSE_DAY, indexes=[]))
+    assert result.st_unknown_names == 1
+    assert snapshot_rows(settings, "st_daily") == [
+        (date(2024, 1, 5), "000001.SZ", None, "unknown"),
+        (date(2024, 1, 5), "600000.SH", "ST浦发", "st"),
+    ]
+
+    behave(plugin, names={"000001.SZ": "平安银行", "600000.SH": "ST浦发"})  # 后来拿到了：不是 ST
+    result_of(*run_at(settings, CLOSE_DAY, indexes=[]))
+    assert snapshot_rows(settings, "st_daily") == [(date(2024, 1, 5), "600000.SH", "ST浦发", "st")]
+
+
+def test_index_exception_only_affects_that_index(settings: Settings) -> None:
+    plugin = install(settings)
+    behave(plugin, index_members=MEMBERS, index_raise=["000905.SH"])
+    confirm(settings)
+    result = result_of(*run_at(settings, CLOSE_DAY, indexes=INDEXES))
+    assert list(result.index_snapshot_failed) == ["000905.SH"]
+    assert "boom" in result.index_snapshot_failed["000905.SH"]
+    assert len(snapshot_rows(settings, "index_members_daily")) == 3  # 000300.SH 照常写入
+
+
+def test_index_crash_fails_task(settings: Settings) -> None:
+    """插件子进程在取成分时崩溃：不是“只影响一个指数”，任务按崩溃失败，不留下快照。"""
+    plugin = install(settings)
+    behave(plugin, index_members=MEMBERS, index_crash=True)
+    confirm(settings)
+    store, task_id = run_at(settings, CLOSE_DAY, indexes=INDEXES)
+    assert "crashed" in failed(store, task_id)
+    assert DataStore(settings.data_dir).head() is None
+
+
+def test_rerun_same_day_replaces_that_days_rows(settings: Settings) -> None:
+    """同一天再同步一次：以最后一次为准，已经不在名单里的行作废。"""
+    plugin = install(settings)
+    behave(plugin, names={"000001.SZ": "*ST平安", "600000.SH": "ST浦发"}, index_members=MEMBERS)
+    confirm(settings)
+    result_of(*run_at(settings, CLOSE_DAY, indexes=INDEXES))
+    assert len(snapshot_rows(settings, "st_daily")) == 2
+
+    members = {"000300.SH": [("600000.SH", None, None)]}
+    behave(plugin, names={"600000.SH": "ST浦发"}, index_members=members)
+    result_of(*run_at(settings, CLOSE_DAY, indexes=INDEXES))
+    assert snapshot_rows(settings, "st_daily") == [(date(2024, 1, 5), "600000.SH", "ST浦发", "st")]
+    assert snapshot_rows(settings, "index_members_daily") == [
+        (date(2024, 1, 5), "000300.SH", "600000.SH")
+    ]
+
+
+def test_failed_sync_leaves_no_snapshot_rows(settings: Settings) -> None:
+    install(settings, bad_bars=True, names={"000001.SZ": "ST平安"})
+    confirm(settings)
+    store, task_id = run_at(settings, CLOSE_DAY, indexes=[])
+    assert "没有请求的证券" in failed(store, task_id)
+    data = DataStore(settings.data_dir)
+    assert data.head() is None
+    assert list(data.files_dir.rglob("*.parquet")) == []
+
+
+def test_all_names_empty_is_unknown(settings: Settings) -> None:
+    """在市股票的名称全是空：ST 状态未知，不写（不能写成“没有 ST”）。"""
+    plugin = install(settings)
+    behave(plugin, names={"000001.SZ": "", "600000.SH": " "})
+    confirm(settings)
+    result = result_of(*run_at(settings, CLOSE_DAY, indexes=[]))
+    assert result.st_snapshot_failed is not None
+    assert snapshot_rows(settings, "st_daily") == []
+
+
+def test_params_indexes_validation() -> None:
+    assert SyncParams(plugin_id="p", indexes=[" 000300.SH ", "000300.SH"]).indexes == ["000300.SH"]
+    assert SyncParams(plugin_id="p").indexes is None
+    with pytest.raises(pydantic.ValidationError):
+        SyncParams(plugin_id="p", indexes=[""])
+
+
+BOTH = {**MEMBERS, "000905.SH": [("600000.SH", None, None), ("000001.SZ", None, None)]}
+
+
+def test_failed_index_keeps_its_existing_rows(settings: Settings) -> None:
+    """同一天重复同步，某个指数这次读取失败：它已有的行不变（未知不是空，也不是作废）。"""
+    plugin = install(settings)
+    behave(plugin, index_members=BOTH)
+    confirm(settings)
+    result_of(*run_at(settings, CLOSE_DAY, indexes=INDEXES))
+    before = snapshot_rows(settings, "index_members_daily")
+    assert {r[1] for r in before} == set(INDEXES)
+
+    behave(plugin, index_members=BOTH, index_raise=["000300.SH"])
+    result = result_of(*run_at(settings, CLOSE_DAY, indexes=INDEXES))
+    assert list(result.index_snapshot_failed) == ["000300.SH"]
+    assert snapshot_rows(settings, "index_members_daily") == before
+
+
+def test_index_not_in_this_run_is_left_alone(settings: Settings) -> None:
+    """这次 indexes 里没有的指数，当天已有的行不动；在列表里的照常以这次为准。"""
+    plugin = install(settings)
+    behave(plugin, index_members=BOTH)
+    confirm(settings)
+    result_of(*run_at(settings, CLOSE_DAY, indexes=INDEXES))
+    others = [r for r in snapshot_rows(settings, "index_members_daily") if r[1] == "000905.SH"]
+    assert others
+
+    changed = {"000300.SH": [("600000.SH", None, None)], "000905.SH": [("600000.SH", None, None)]}
+    behave(plugin, index_members=changed)
+    result_of(*run_at(settings, CLOSE_DAY, indexes=["000300.SH"]))
+    rows = snapshot_rows(settings, "index_members_daily")
+    assert [r for r in rows if r[1] == "000905.SH"] == others
+    assert [r[2] for r in rows if r[1] == "000300.SH"] == ["600000.SH"]

@@ -336,6 +336,10 @@ def test_sync_counts(golden: tuple[DataStore, SyncResult]) -> None:
         "calendar": 10,
         "bars_1d": BARS_ROWS,
         "adj_factors": FACTOR_ROWS,
+        # 同步区间止于 2024-01-10，早于最近已收盘的日子，属于回补历史：
+        # 按 data.md“ST 名单和指数成分快照”的规则不写快照（#43）
+        "st_daily": 0,
+        "index_members_daily": 0,
     }
 
 

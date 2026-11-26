@@ -50,6 +50,25 @@ DELIST_DATE_QUALITY_SCHEMA: dict[str, pl.DataType] = {"symbol": pl.String(), "ex
 快照里没有这个数据集的行时，是“不知道”，不是“精确”。
 """
 
+ST_DAILY_SCHEMA: dict[str, pl.DataType] = {
+    "date": pl.Date(),
+    "symbol": pl.String(),
+    "name": pl.String(),
+    "status": pl.String(),
+}
+"""每日 ST 名单快照（平台的数据集）：date 那天的 ST 证券和 ST 状态未知的证券。
+
+``status`` 为 ``st``：名称是 ST 前缀；``unknown``：名称拿不到（``name`` 为 null），ST 状态
+未知，不能当成非 ST。某个日期有任何一行才表示这一天有快照；有快照的日子里不在表里的在市
+股票是非 ST；没有快照的日子是“不知道”，不是“没有 ST”。"""
+
+INDEX_MEMBERS_DAILY_SCHEMA: dict[str, pl.DataType] = {
+    "date": pl.Date(),
+    "index": pl.String(),
+    "symbol": pl.String(),
+}
+"""每日指数成分快照（平台的数据集）。某个日期某个指数有行才表示这一天有这个指数的快照。"""
+
 DATASETS: dict[str, Dataset] = {
     d.name: d
     for d in (
@@ -58,6 +77,13 @@ DATASETS: dict[str, Dataset] = {
         Dataset("securities", SECURITIES_SCHEMA, ("symbol",)),
         Dataset("calendar", CALENDAR_SCHEMA, ("market", "date")),
         Dataset("delist_date_quality", DELIST_DATE_QUALITY_SCHEMA, ("symbol",)),
+        Dataset("st_daily", ST_DAILY_SCHEMA, ("date", "symbol"), partition_by_year="date"),
+        Dataset(
+            "index_members_daily",
+            INDEX_MEMBERS_DAILY_SCHEMA,
+            ("date", "index", "symbol"),
+            partition_by_year="date",
+        ),
     )
 }
 

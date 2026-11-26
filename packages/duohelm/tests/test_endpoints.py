@@ -581,7 +581,9 @@ def _free_port() -> int:
 
 def test_plugin_receives_confirmed_address(tmp_path: Path) -> None:
     entry = make_entry(tmp_path)
-    with PluginSession(entry, limits=FAST, endpoints={"svc": "192.168.31.5:58610"}) as s:
+    with PluginSession(
+        entry, limits=FAST, endpoints={"svc": "192.168.31.5:58610"}, network=()
+    ) as s:
         df = s.call("compute", "endpoint", DATA)
     assert df.row(0) == ("192.168.31.5", 58610, True, None)
 
@@ -622,7 +624,7 @@ def test_unconfirmed_default_is_not_allowed(tmp_path: Path) -> None:
 def test_plugin_gets_no_address_without_config(tmp_path: Path) -> None:
     """不传 endpoints：插件在平台里，但拿不到清单的 default，也拿不到代码里的 default。"""
     entry = make_entry(tmp_path)
-    with PluginSession(entry, limits=FAST) as s:
+    with PluginSession(entry, limits=FAST, endpoints={}, network=()) as s:
         row = s.call("compute", "endpoint", DATA).row(0, named=True)
     assert (row["host"], row["port"], row["in_platform"]) == (None, None, True)
     assert "插件页确认" in row["error"]
@@ -641,16 +643,16 @@ def test_network_reaches_child_only_after_approval(tmp_path: Path) -> None:
         assert s.call("compute", "allows:8.8.8.8:80", DATA)["ok"].item() is False
 
 
-def test_session_without_network_param_allows_none(tmp_path: Path) -> None:
-    """直接构造 PluginSession 且不传 network：清单的 network 一个都不放行。"""
+def test_session_with_empty_network_allows_none(tmp_path: Path) -> None:
+    """network 为空：清单的 network 一个都不放行。"""
     entry = make_entry(tmp_path, network=NETWORK)
-    with PluginSession(entry, limits=FAST) as s:
+    with PluginSession(entry, limits=FAST, endpoints={}, network=()) as s:
         assert s.call("compute", "allows:8.8.8.8:53", DATA)["ok"].item() is False
 
 
 def test_session_refuses_network_not_in_manifest(tmp_path: Path) -> None:
     entry = make_entry(tmp_path, network=NETWORK)
-    session = PluginSession(entry, limits=FAST, network=["1.1.1.1:53"])
+    session = PluginSession(entry, limits=FAST, network=["1.1.1.1:53"], endpoints={})
     with pytest.raises(PluginRunError, match="不在清单的 network 里") as info:
         session.start()
     assert info.value.reason == "load"
@@ -661,7 +663,7 @@ def test_session_refuses_network_not_in_manifest(tmp_path: Path) -> None:
 def test_endpoint_address_is_allowed(tmp_path: Path, listener: tuple[int, list[str]]) -> None:
     port, seen = listener
     entry, endpoints = loopback(tmp_path, port)
-    with PluginSession(entry, limits=FAST, endpoints=endpoints) as s:
+    with PluginSession(entry, limits=FAST, endpoints=endpoints, network=()) as s:
         assert s.call("compute", f"connect:{port}", DATA)["ok"].item() is True
         with pytest.raises(PluginRunError, match="没有网络权限"):
             s.call("compute", f"connect:{_free_port()}", DATA)
@@ -673,7 +675,7 @@ def test_endpoint_default_port_only(tmp_path: Path, listener: tuple[int, list[st
     port, seen = listener
     entry = make_entry(tmp_path, scope="loopback", default=f"127.0.0.1:{port}")
     with (
-        PluginSession(entry, limits=FAST) as s,
+        PluginSession(entry, limits=FAST, endpoints={}, network=()) as s,
         pytest.raises(PluginRunError, match="没有网络权限"),
     ):
         s.call("compute", f"connect:{port}", DATA)
@@ -705,7 +707,7 @@ def test_unix_socket_refused(tmp_path: Path) -> None:
     try:
         entry, endpoints = loopback(tmp_path / "p", _free_port())
         with (
-            PluginSession(entry, limits=FAST, endpoints=endpoints) as s,
+            PluginSession(entry, limits=FAST, endpoints=endpoints, network=()) as s,
             pytest.raises(PluginRunError, match="不能连接"),
         ):
             s.call("compute", f"unix:{path}", DATA)
@@ -719,7 +721,7 @@ def test_sendmsg_refused_even_if_allowed(tmp_path: Path) -> None:
     port = _free_port()
     entry, endpoints = loopback(tmp_path, port)
     with (
-        PluginSession(entry, limits=FAST, endpoints=endpoints) as s,
+        PluginSession(entry, limits=FAST, endpoints=endpoints, network=()) as s,
         pytest.raises(PluginRunError, match="sendmsg"),
     ):
         s.call("compute", f"sendmsg:{port}", DATA)
@@ -728,7 +730,7 @@ def test_sendmsg_refused_even_if_allowed(tmp_path: Path) -> None:
 def test_reverse_lookup_always_refused(tmp_path: Path) -> None:
     entry, endpoints = loopback(tmp_path, _free_port())
     with (
-        PluginSession(entry, limits=FAST, endpoints=endpoints) as s,
+        PluginSession(entry, limits=FAST, endpoints=endpoints, network=()) as s,
         pytest.raises(PluginRunError, match="gethostbyaddr"),
     ):
         s.call("compute", "reverse", DATA)
@@ -741,12 +743,12 @@ def test_udp_sendto(tmp_path: Path) -> None:
     port = int(receiver.getsockname()[1])
     try:
         allowed, endpoints = loopback(tmp_path / "a", port)
-        with PluginSession(allowed, limits=FAST, endpoints=endpoints) as s:
+        with PluginSession(allowed, limits=FAST, endpoints=endpoints, network=()) as s:
             assert s.call("compute", f"udp:{port}", DATA)["ok"].item() is True
         assert receiver.recv(16) == b"x"
         blocked, other = loopback(tmp_path / "b", port + 1)
         with (
-            PluginSession(blocked, limits=FAST, endpoints=other) as s,
+            PluginSession(blocked, limits=FAST, endpoints=other, network=()) as s,
             pytest.raises(PluginRunError, match="没有网络权限"),
         ):
             s.call("compute", f"udp:{port}", DATA)
@@ -759,20 +761,20 @@ def test_asyncio_connection_is_guarded(tmp_path: Path, listener: tuple[int, list
     port, seen = listener
     blocked = make_entry(tmp_path / "b")
     with (
-        PluginSession(blocked, limits=FAST) as s,
+        PluginSession(blocked, limits=FAST, endpoints={}, network=()) as s,
         pytest.raises(PluginRunError, match="没有网络权限"),
     ):
         s.call("compute", f"asyncio:{port}", DATA)
     assert seen == []
     allowed, endpoints = loopback(tmp_path / "a", port)
-    with PluginSession(allowed, limits=FAST, endpoints=endpoints) as s:
+    with PluginSession(allowed, limits=FAST, endpoints=endpoints, network=()) as s:
         assert s.call("compute", f"asyncio:{port}", DATA)["ok"].item() is True
     assert len(seen) == 1
 
 
 def test_check_connection_crosses_process(tmp_path: Path) -> None:
     entry = make_entry(tmp_path, kind="datasource")
-    with PluginSession(entry, limits=FAST, endpoints={"svc": "127.0.0.1:58611"}) as s:
+    with PluginSession(entry, limits=FAST, endpoints={"svc": "127.0.0.1:58611"}, network=()) as s:
         status = s.call("check_connection")
     assert status == ConnectionStatus(ok=False, message="连不上 58611")
 
@@ -780,7 +782,7 @@ def test_check_connection_crosses_process(tmp_path: Path) -> None:
 def test_check_connection_reports_unconfirmed(tmp_path: Path) -> None:
     """没确认地址时，check_connection 能把“去插件页确认”的提示带回平台。"""
     entry = make_entry(tmp_path, kind="datasource")
-    with PluginSession(entry, limits=FAST) as s:
+    with PluginSession(entry, limits=FAST, endpoints={}, network=()) as s:
         status = s.call("check_connection")
     assert status.ok is False and "插件页确认" in status.message
 
@@ -789,7 +791,7 @@ def test_check_connection_reports_unconfirmed(tmp_path: Path) -> None:
 def test_session_refuses_address_outside_scope(tmp_path: Path, address: str) -> None:
     """第二次校验：地址不符合 scope 时不启动子进程。"""
     entry = make_entry(tmp_path)
-    session = PluginSession(entry, limits=FAST, endpoints={"svc": address})
+    session = PluginSession(entry, limits=FAST, endpoints={"svc": address}, network=())
     with pytest.raises(PluginRunError) as info:
         session.start()
     assert info.value.reason == "load"
@@ -801,7 +803,7 @@ def test_session_refuses_address_outside_scope(tmp_path: Path, address: str) -> 
 
 def test_session_refuses_undeclared_endpoint(tmp_path: Path) -> None:
     entry = make_entry(tmp_path)
-    session = PluginSession(entry, limits=FAST, endpoints={"other": "127.0.0.1:1"})
+    session = PluginSession(entry, limits=FAST, endpoints={"other": "127.0.0.1:1"}, network=())
     with pytest.raises(PluginRunError, match="没有声明"):
         session.start()
     session.close()

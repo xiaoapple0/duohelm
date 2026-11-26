@@ -47,8 +47,17 @@ from duohelm_sdk.checks import check_factor_output
 logger = logging.getLogger(__name__)
 
 FailureReason = Literal[
-    "timeout", "memory", "cancelled", "crashed", "load", "plugin_error", "protocol", "contract"
+    "timeout",
+    "memory",
+    "cancelled",
+    "crashed",
+    "load",
+    "plugin_error",
+    "protocol",
+    "contract",
+    "unsupported",
 ]
+"""``unsupported``：插件没有实现这个方法（只会出现在可选的方法上，如 check_connection）。"""
 SUPPORTED_KINDS = frozenset({"factor", "datasource"})
 
 # 子进程只继承这些环境变量。凭据、DUOHELM_* 配置、代理设置等一律不传。
@@ -137,8 +146,8 @@ def session_for(
 ) -> PluginSession:
     """平台运行插件的入口：带上用户在插件页确认过的连接地址。
 
-    平台代码（同步任务等）应当用它，而不是直接构造 :class:`PluginSession`；直接构造时
-    不传 ``endpoints``，插件拿不到任何 endpoint 的地址（``endpoint()`` 报错）。
+    平台代码（同步任务等）应当用它，而不是直接构造 :class:`PluginSession`：直接构造时
+    要自己传 ``endpoints`` 和 ``network``，容易传错。
     """
     if entry.manifest is None:
         raise PluginRunError("load", f"插件 {entry.id} 的清单无效，不能运行")
@@ -167,17 +176,20 @@ class PluginSession:
         limits: Limits | None = None,
         cancel: threading.Event | None = None,
         log: Callable[[str], None] | None = None,
-        endpoints: Mapping[str, str] | None = None,
-        network: Sequence[str] = (),
+        endpoints: Mapping[str, str],
+        network: Sequence[str],
     ) -> None:
-        """``endpoints``：用户确认过的连接地址（endpoint id -> ``主机:端口``），通常来自
+        """``endpoints`` 和 ``network`` 必须显式传入（可以为空），调用方没法漏传（#24）。
+        平台代码应当用 :func:`session_for`，它从用户配置里取这两项。
+
+        ``endpoints``：用户确认过的连接地址（endpoint id -> ``主机:端口``），通常来自
         :meth:`duohelm.endpoints.EndpointStore.addresses_for`。只有这里的地址交给插件并放行；
         没给的 endpoint，插件的 ``endpoint()`` 报错（提示用户去插件页确认），也不放行。
         启动子进程之前按 scope 再校验一次。
 
         ``network``：放行的清单 network 地址，来自
-        :meth:`duohelm.endpoints.EndpointStore.network_for`（用户确认过才有）。默认为空，
-        即不放行清单的 network；必须是清单 network 的子集。"""
+        :meth:`duohelm.endpoints.EndpointStore.network_for`（用户确认过才有）。为空时不放行
+        清单的 network；必须是清单 network 的子集。"""
         if entry.status is not PluginStatus.READY or entry.manifest is None:
             raise PluginRunError("load", f"插件 {entry.id} 的状态是 {entry.status}，不能运行")
         info = entry.manifest.plugin
@@ -193,7 +205,7 @@ class PluginSession:
         self._kind = info.kind
         self._entrypoint = info.entrypoint
         self._manifest = entry.manifest
-        self._endpoint_texts: dict[str, str] = dict(endpoints or {})
+        self._endpoint_texts: dict[str, str] = dict(endpoints)
         self._network = list(network)
 
         self.workdir: Path | None = None
@@ -552,7 +564,7 @@ class PluginSession:
 def _from_error(reply: Mapping[str, Any]) -> PluginRunError:
     kind = str(reply.get("kind", "plugin_error"))
     reason: FailureReason
-    if kind in ("memory", "load", "protocol", "plugin_error"):
+    if kind in ("memory", "load", "protocol", "plugin_error", "unsupported"):
         reason = cast(FailureReason, kind)
     else:
         reason = "plugin_error"

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import os
 import sys
 import traceback
@@ -125,9 +126,21 @@ def serve(proto_in: BinaryIO, proto_out: BinaryIO) -> int:
             write_message(proto_out, _error("protocol", ProtocolError(f"不允许调用 {method}")))
             continue
         try:
+            inspect.getattr_static(plugin, method)
+        except AttributeError:
+            # 可选的方法（如 check_connection）插件可以不实现，调用方据此跳过。
+            # 只认“根本没有这个属性”：属性存在但不可调用、或取值时出错，都算插件的错
+            write_message(
+                proto_out, _error("unsupported", NotImplementedError(f"插件没有实现 {method}"))
+            )
+            continue
+        try:
             args = decode(message.get("args", []), inputs)
             kwargs = decode(message.get("kwargs", {}), inputs)
-            result = getattr(plugin, method)(*args, **kwargs)
+            function = getattr(plugin, method)
+            if not callable(function):
+                raise TypeError(f"插件的 {method} 不可调用（{type(function).__name__}）")
+            result = function(*args, **kwargs)
         except MemoryError as exc:
             write_message(proto_out, _error("memory", exc))
             continue

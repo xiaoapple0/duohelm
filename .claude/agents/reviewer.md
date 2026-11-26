@@ -66,7 +66,7 @@ git log --oneline origin/main..HEAD
 
 ### 4. CI 与分支保护
 
-- 新增、删除或改名的 CI job（看 `name:` 和矩阵展开后的名称）：分支保护里的必需检查是按名称精确匹配的，需要同步更新。用 `gh api repos/{owner}/{repo}/branches/main/protection` 查看当前的必需检查（只读）；查不到时，写明需要维护者确认
+- 新增、删除或改名的 CI job（看 `name:` 和矩阵展开后的名称）：分支保护里的必需检查是按名称精确匹配的，需要同步更新。本仓库用规则集（ruleset）设置必需检查：先用 `gh api repos/xiaoapple0/duohelm/rules/branches/main` 查看（只读，看 `required_status_checks` 规则里的 `context`）；查不到时再试 `gh api repos/xiaoapple0/duohelm/branches/main/protection`（传统分支保护，返回 404 “Branch not protected” 不代表没有必需检查）；两个都查不到时，写明需要维护者确认
 
 ### 5. 分支
 

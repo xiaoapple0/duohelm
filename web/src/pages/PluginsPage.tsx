@@ -332,8 +332,8 @@ export default function PluginsPage() {
             {e.configured !== null && (
               <Popconfirm
                 title="清除已保存的地址？"
-                description={`插件的地址回到默认的 ${e.default}，确认之前不能连接`}
-                okText="恢复"
+                description="清除后回到未确认：插件拿不到地址，也不能连接，直到重新确认"
+                okText="清除"
                 cancelText="取消"
                 onConfirm={() => void clear(plugin, e)}
               >

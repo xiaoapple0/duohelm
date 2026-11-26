@@ -79,7 +79,7 @@ default = "127.0.0.1:58610"       # 默认地址，必须符合 scope；用户�
 scope = "lan"                     # 用户能填的地址范围
 ```
 
-插件代码用 `duohelm_sdk.endpoint("miniqmt", default="127.0.0.1:58610")` 取得地址（`Address(host, port)`）。在平台里运行时，返回用户确认过的地址（没有确认的返回清单的 `default`，代码里的 `default` 被忽略）；**只有用户确认过的地址放行，没确认时连清单的 `default` 也连不上**，插件可以据此提示用户去插件页确认；不在平台里运行时（测试、独立脚本），返回代码里的 `default`。
+插件代码用 `duohelm_sdk.endpoint("miniqmt", default="127.0.0.1:58610")` 取得地址（`Address(host, port)`）。在平台里运行时，返回用户确认过的地址，代码里的 `default` 被忽略；**用户还没确认时（包括需要重新确认时），平台不把任何地址交给插件，`endpoint()` 抛 `EndpointNotConfiguredError`**，消息提示用户去插件页确认，插件把它原样报告出来即可（实现了 `check_connection` 的，在这里返回 `ConnectionStatus(ok=False, message=str(exc))`）。不在平台里运行时（测试、独立脚本），返回代码里的 `default`。
 
 scope 规则（`duohelm_sdk.endpoints.parse_address`）：
 
@@ -99,10 +99,10 @@ scope 规则（`duohelm_sdk.endpoints.parse_address`）：
 - 地址是否符合 scope 由平台校验两次，用的都是 `duohelm_sdk.parse_address`：
   - **保存时**：`EndpointStore.confirm`，不合格返回 422
   - **启动插件子进程、传地址之前**：`PluginSession.start` 调用 `checked_addresses`，不合格时不启动子进程，报 `load` 错误。错误信息会进任务日志，只写 endpoint 和 scope，不写地址
-- 平台代码运行插件时用 `duohelm.isolation.session_for(entry, store)`，它从 `EndpointStore` 取出确认过的地址传给 `PluginSession`。直接构造 `PluginSession` 而不传 `endpoints` 时，插件只拿到 `default`，而且连不上。**目前还没有平台代码运行插件**，同步任务（M1）是第一个调用方，接入时必须用 `session_for`（#24）
-- 需要重新确认的情况：清单里 `[[permissions.endpoints]]` 这一节变了。按这一节规范化 JSON 的 sha256 判断（`endpoints_digest`），插件升版本、改插件名称或说明、改 `network` 等清单其他部分的改动都不算；endpoint 自己的 `description`、`default`、`scope` 变了算。需要重新确认时，页面显示“需要重新确认，不能连接”，插件拿到的是 `default`，但已保存的地址和 `default` 在用户重新确认之前都不放行
+- 平台代码运行插件时用 `duohelm.isolation.session_for(entry, store)`，它从 `EndpointStore` 取出确认过的地址传给 `PluginSession`。直接构造 `PluginSession` 而不传 `endpoints` 时，插件拿不到任何 endpoint 的地址。**目前还没有平台代码运行插件**，同步任务（M1）是第一个调用方，接入时必须用 `session_for`（#24）
+- 需要重新确认的情况：清单里 `[[permissions.endpoints]]` 这一节变了。按这一节规范化 JSON 的 sha256 判断（`endpoints_digest`），插件升版本、改插件名称或说明、改 `network` 等清单其他部分的改动都不算；endpoint 自己的 `description`、`default`、`scope` 变了算。需要重新确认时，页面显示“需要重新确认，不能连接”；用户重新确认之前，插件拿不到地址（已保存的地址和 `default` 都不交给插件），也不放行
 - endpoint 的确认、清除和 network 的确认、撤销，都记进审计表 `permission_audit`（对象、旧值、新值、当时的哈希、时间），只在本机数据库里。普通日志、质量报告和任务日志里不写具体地址
-- 子进程收到 `start` 后、导入插件代码之前，按“**用户确认过的** `network` + 传给插件的 endpoint 地址”设置网络白名单（`session_for` 从 `EndpointStore.network_for` 取 network，没确认时为空；直接构造 `PluginSession` 不传 `network` 时也为空；传入的 network 必须是清单的子集），并设置 `duohelm_sdk.endpoint()` 能取到的地址。白名单逐个精确匹配主机和端口；白名单里的主机名必须解析到公网 IP，解析出来的公网 IP 按主机名那一项的端口规则放行。原生扩展（如 xtquant）和插件启动的子进程不经过这层拦截。**已知缺口（#27）**：没确认的 endpoint，平台仍把清单的 `default` 传给插件（`endpoint()` 返回它），只是不进白名单；原生扩展拿到 default 后可以直接连上，所以对原生代码来说“没确认就不放行”目前不成立（威胁模型见下）
+- 子进程收到 `start` 后、导入插件代码之前，按“**用户确认过的** `network` + 用户确认过的 endpoint 地址”设置网络白名单（`session_for` 从 `EndpointStore.network_for` 取 network，没确认时为空；直接构造 `PluginSession` 不传 `network` 时也为空；传入的 network 必须是清单的子集），并设置 `duohelm_sdk.endpoint()` 能取到的地址（只有确认过的；没确认的只传 id，`endpoint()` 据此报“还没有确认”）。白名单逐个精确匹配主机和端口；白名单里的主机名必须解析到公网 IP，解析出来的公网 IP 按主机名那一项的端口规则放行。原生扩展（如 xtquant）和插件启动的子进程不经过这层拦截：平台不交出没确认的地址，所以按 `endpoint()` 取地址的插件（包括用原生扩展连接的）在用户确认之前连不上；但插件代码自己写死地址、交给原生扩展去连，这层拦不住（威胁模型见下，操作系统层的隔离见 #7）
 - 实现了 `check_connection` 的插件，平台可以在隔离进程里调用它（同步任务里接入）
 
 ## 加载流程
@@ -152,7 +152,7 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 | 结束进程树 | Windows 用 Job Object，进程以挂起状态启动、加入 Job 后再恢复，venv 启动器之后启动的解释器和插件启动的所有进程都在 Job 里；加入 Job 失败时不恢复，直接结束这个挂起的进程并报错；POSIX 用独立的进程组，外加 psutil 找到的子进程 | POSIX 上调用 `setsid` 脱离进程组、并且在结束时已经找不到的孙进程 |
 | 内存 | 整棵进程树 2 GiB（`DUOHELM_PLUGIN_MEMORY_MB`）。Windows 是 Job Object 硬限制；所有平台的父进程每 0.5 秒检查一次 RSS，超限就结束 | Linux 和 macOS 上两次检查之间的瞬时峰值 |
 | 环境变量 | 只继承白名单里的系统变量；`HOME`、`TEMP` 等指向会话临时目录。`DUOHELM_*`、代理设置和一切凭据都不传 | — |
-| 网络 | **Python 层**拦截：替换 `socket` 模块里的连接、解析和发送入口，以及 Windows 上 asyncio Proactor 的连接和 UDP 发送；只放行用户确认过的 `permissions.network` 和传给插件的 endpoint 地址（逐个匹配主机和端口），主机名必须解析到公网 IP；反向解析、Unix 套接字、`sendmsg` 一律拒绝 | 原生扩展、ctypes、厂商 DLL / so 直接调用系统接口（如 xtquant 连接 MiniQMT）；插件启动的子进程（如调用 curl）不继承拦截（#7） |
+| 网络 | **Python 层**拦截：替换 `socket` 模块里的连接、解析和发送入口，以及 Windows 上 asyncio Proactor 的连接和 UDP 发送；只放行用户确认过的 `permissions.network` 和 endpoint 地址（逐个匹配主机和端口），`network` 里的主机名必须解析到公网 IP；没确认的 endpoint 地址不交给插件；反向解析、Unix 套接字、`sendmsg` 一律拒绝 | 原生扩展、ctypes、厂商 DLL / so 直接调用系统接口（如 xtquant 连接 MiniQMT），插件代码写死地址交给它们时照样能连上；插件启动的子进程（如调用 curl）不继承拦截（#7） |
 | 文件系统 | 不限制 | 插件可以读写当前用户能访问的任何文件 |
 | 凭据 | 子进程拿不到任何凭据。存储和注入见 [#6](https://github.com/xiaoapple0/duohelm/issues/6) | — |
 
@@ -163,7 +163,7 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 - stderr 作为插件日志转给调用方，每次会话最多 256 KiB，超出部分丢弃，并记一条说明
 - 数据表用 Arrow IPC 文件在会话临时目录里传递。读取时先把整个文件读进内存再解析，不做内存映射，读完立即删除文件（Windows 上被映射的文件删不掉）
 - 子进程只接受规定的方法：因子插件只有 `compute`，行情源插件只有 `DataSourcePlugin` 协议里的方法，加上可选的 `check_connection`（SDK 0.3）。交易接口插件和算子插件不能单独在隔离进程里运行：算子只在依赖它的因子插件的子进程里加载，算子返回的 polars 表达式永远不跨进程
-- 平台在发出 `start` 之后，子进程才导入插件代码；在此之前已经完成 fd 重定向、网络拦截，以及（Windows 上）加入 Job。`start` 消息带上网络白名单（`network`）和 endpoint 地址（`endpoints`），子进程先按它们设置好，再导入插件
+- 平台在发出 `start` 之后，子进程才导入插件代码；在此之前已经完成 fd 重定向、网络拦截，以及（Windows 上）加入 Job。`start` 消息带上网络白名单（`network`）、确认过的 endpoint 地址（`endpoints`）和没确认的 endpoint id（`unconfirmed_endpoints`），子进程先按它们设置好，再导入插件
 
 ### 错误分类（`PluginRunError.reason`）
 
@@ -202,22 +202,23 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 
 ### 变更记录
 
-**SDK 0.4.0（M1）**，不兼容：`permissions.network` 的含义收紧。0.3 下有效的清单（`network` 里写了本机或局域网地址）在 0.4 下无效，按“改变含义是不兼容改动”升次版本号：
+**SDK 0.4.0（M1）**，不兼容，有两项：`permissions.network` 的含义收紧，0.3 下有效的清单（`network` 里写了本机或局域网地址）在 0.4 下无效；`endpoint()` 遇到没确认的 endpoint 从返回 `default` 改为报错。按“改变含义是不兼容改动”升次版本号：
 
 - `network` 只允许公网地址：解析清单时拒绝本机、私有网段、链路本地、保留地址（包括 `127.1`、`0x7f.0.0.1` 这类数字或十六进制写法），以及 `localhost`、`*.localhost`、`*.local`、`*.lan`、`*.internal`、`*.home.arpa`，报错信息提示改用 `[[permissions.endpoints]]`
-- SDK 的接口（`__all__`、协议、数据格式）没有变化
+- `endpoint()` 在平台里遇到用户还没确认的 endpoint（包括需要重新确认的），抛 `EndpointNotConfiguredError`，0.3 返回清单的 `default`。这样原生扩展（不经过 Python 层的网络拦截）在用户确认之前也拿不到地址（#27）
+- `__all__`、协议、数据格式没有变化
 
 同一版本里平台的行为（不是 SDK 接口，但插件作者需要知道）：
 
 - `network` 的整个列表要用户在插件页确认后才放行，列表变了要重新确认
 - 运行时 netguard 按实际解析出的 IP 检查：`network` 里的主机名解析到本机或私有网段时拦截
-- 没确认过的 endpoint 一律不放行，包括清单的 `default`：`endpoint()` 仍然返回 `default`，但连接会被拦截，直到用户在插件页确认
+- 没确认过的 endpoint 一律不放行，包括清单的 `default`；插件也拿不到这个地址（见上面 `endpoint()` 那一条）
 
 迁移：
 
 - `network` 里写了本机或局域网地址的插件，改用 `[[permissions.endpoints]]`（例如 xtdata 的 `127.0.0.1:58610` 改为 `miniqmt` endpoint，scope 为 `lan`），清单的 `sdk` 写 `">=0.4,<0.5"`
-- `network` 只写了公网地址（或为空）的插件不需要改代码，把清单的 `sdk` 放宽为 `">=0.3,<0.5"` 即可
-- 用 endpoints 的插件：用户确认之前连不上，连接失败时提示用户去插件页确认地址（实现了 `check_connection` 的，在这里返回明确的提示）
+- `network` 只写了公网地址（或为空）、并且没有用 `[[permissions.endpoints]]` 的插件不需要改代码，把清单的 `sdk` 放宽为 `">=0.3,<0.5"` 即可
+- 用 endpoints 的插件：用户确认之前 `endpoint()` 会抛 `EndpointNotConfiguredError`，捕获后把消息报告给用户（实现了 `check_connection` 的，在这里返回 `ok=False` 和这条消息）；不要退回到代码里写死的地址
 - 官方插件：xtdata 改用 `endpoint("miniqmt")`、实现 `check_connection`，`sdk` 写 `">=0.4,<0.5"`；eltdx 按上面的规则调整 `sdk` 范围。两者在插件仓库单独提 PR
 
 **SDK 0.3.0（M1）**，只有新增，但清单多了字段，旧版平台无法解析（清单不接受未知字段），所以升次版本号：

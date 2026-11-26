@@ -179,7 +179,7 @@ def test_endpoints_change_requires_reconfirmation(store: EndpointStore) -> None:
     store.confirm(manifest(), "svc", "192.168.31.5:58610", confirmed=True)
     # 插件升版本：不需要重新确认
     assert store.addresses_for(manifest(version="1.1.0")) == {"svc": "192.168.31.5:58610"}
-    # endpoints 这一节变了：已保存的地址停用，用 default，直到重新确认
+    # endpoints 这一节变了：已保存的地址停用；页面预填 default，插件拿不到地址，直到重新确认
     changed = manifest(description="新说明")
     (view,) = store.views(changed)
     assert view.state == "needs_confirmation"
@@ -214,8 +214,10 @@ def test_store_survives_reopen(tmp_path: Path) -> None:
 # ---- 传地址之前的第二次校验 ----
 
 
-def test_checked_addresses_fills_defaults() -> None:
-    assert checked_addresses(manifest(), {}) == {"svc": Address("127.0.0.1", 58610)}
+def test_checked_addresses_does_not_fill_defaults() -> None:
+    """没确认的 endpoint 不补 default：插件拿不到它的地址。"""
+    assert checked_addresses(manifest(), {}) == {}
+    assert checked_addresses(manifest(), {"svc": "127.0.0.1:1"}) == {"svc": Address("127.0.0.1", 1)}
 
 
 @pytest.mark.parametrize("address", ["miniqmt.lan:58610", "8.8.8.8:58610", "192.168.1.2"])
@@ -438,7 +440,7 @@ PLUGIN_CODE = r"""
 import socket
 
 import polars as pl
-from duohelm_sdk import endpoint
+from duohelm_sdk import EndpointNotConfiguredError, endpoint
 from duohelm_sdk.context import in_platform
 
 
@@ -446,9 +448,16 @@ class Plugin:
     def compute(self, factor_id, data):
         name, _, arg = factor_id.partition(":")
         if name == "endpoint":
-            a = endpoint("svc", default="127.0.0.1:1")
             inside = in_platform()
-            return pl.DataFrame({"host": [a.host], "port": [a.port], "in_platform": [inside]})
+            try:
+                a = endpoint("svc", default="127.0.0.1:1")
+            except EndpointNotConfiguredError as exc:
+                return pl.DataFrame(
+                    {"host": [None], "port": [None], "in_platform": [inside], "error": [str(exc)]}
+                )
+            return pl.DataFrame(
+                {"host": [a.host], "port": [a.port], "in_platform": [inside], "error": [None]}
+            )
         if name == "allows":  # 子进程里实际生效的白名单
             from duohelm.isolation import netguard
 
@@ -505,7 +514,10 @@ class Source:
     def check_connection(self):
         from duohelm_sdk import ConnectionStatus
 
-        a = endpoint("svc", default="127.0.0.1:1")
+        try:
+            a = endpoint("svc", default="127.0.0.1:1")
+        except EndpointNotConfiguredError as exc:
+            return ConnectionStatus(ok=False, message=str(exc))
         return ConnectionStatus(ok=False, message=f"连不上 {a.port}")
 
 
@@ -571,7 +583,7 @@ def test_plugin_receives_confirmed_address(tmp_path: Path) -> None:
     entry = make_entry(tmp_path)
     with PluginSession(entry, limits=FAST, endpoints={"svc": "192.168.31.5:58610"}) as s:
         df = s.call("compute", "endpoint", DATA)
-    assert df.row(0) == ("192.168.31.5", 58610, True)
+    assert df.row(0) == ("192.168.31.5", 58610, True, None)
 
 
 def test_confirmed_address_reaches_plugin(tmp_path: Path) -> None:
@@ -580,34 +592,40 @@ def test_confirmed_address_reaches_plugin(tmp_path: Path) -> None:
     assert entry.manifest is not None
     store = EndpointStore(tmp_path / "plugin-config.db")
     with session_for(entry, store, limits=FAST) as s:
-        assert s.call("compute", "endpoint", DATA).row(0)[:2] == ("127.0.0.1", 58610)
+        assert s.call("compute", "endpoint", DATA)["host"].item() is None  # 没确认：拿不到地址
     store.confirm(entry.manifest, "svc", "192.168.31.5:58610", confirmed=True)
     with session_for(entry, store, limits=FAST) as s:
         assert s.call("compute", "endpoint", DATA).row(0)[:2] == ("192.168.31.5", 58610)
 
 
 def test_unconfirmed_default_is_not_allowed(tmp_path: Path) -> None:
-    """完整路径：没确认过的 endpoint，插件拿到 default，但这个地址不放行；确认 default 后才放行。"""
+    """完整路径：没确认过的 endpoint，插件拿不到地址（包括 default），也不放行；确认后才有。"""
     entry = make_entry(tmp_path / "plugins")
     assert entry.manifest is not None
     store = EndpointStore(tmp_path / "plugin-config.db")
     with session_for(entry, store, limits=FAST) as s:
-        assert s.call("compute", "endpoint", DATA).row(0)[:2] == ("127.0.0.1", 58610)
+        row = s.call("compute", "endpoint", DATA).row(0, named=True)
+        assert (row["host"], row["port"]) == (None, None)
+        assert "插件页确认" in row["error"]
         assert s.call("compute", "allows:127.0.0.1:58610", DATA)["ok"].item() is False
     store.confirm(entry.manifest, "svc", "127.0.0.1:58610", confirmed=True)
     with session_for(entry, store, limits=FAST) as s:
+        assert s.call("compute", "endpoint", DATA).row(0)[:2] == ("127.0.0.1", 58610)
         assert s.call("compute", "allows:127.0.0.1:58610", DATA)["ok"].item() is True
-    # endpoints 那一节变了：需要重新确认，之前不放行
+    # endpoints 那一节变了：需要重新确认，之前拿不到旧地址，也不放行
     changed = make_entry(tmp_path / "changed", description="新说明")
     with session_for(changed, store, limits=FAST) as s:
+        assert s.call("compute", "endpoint", DATA)["host"].item() is None
         assert s.call("compute", "allows:127.0.0.1:58610", DATA)["ok"].item() is False
 
 
-def test_plugin_receives_default_without_config(tmp_path: Path) -> None:
+def test_plugin_gets_no_address_without_config(tmp_path: Path) -> None:
+    """不传 endpoints：插件在平台里，但拿不到清单的 default，也拿不到代码里的 default。"""
     entry = make_entry(tmp_path)
     with PluginSession(entry, limits=FAST) as s:
-        df = s.call("compute", "endpoint", DATA)
-    assert df.row(0) == ("127.0.0.1", 58610, True)
+        row = s.call("compute", "endpoint", DATA).row(0, named=True)
+    assert (row["host"], row["port"], row["in_platform"]) == (None, None, True)
+    assert "插件页确认" in row["error"]
 
 
 def test_network_reaches_child_only_after_approval(tmp_path: Path) -> None:
@@ -757,6 +775,14 @@ def test_check_connection_crosses_process(tmp_path: Path) -> None:
     with PluginSession(entry, limits=FAST, endpoints={"svc": "127.0.0.1:58611"}) as s:
         status = s.call("check_connection")
     assert status == ConnectionStatus(ok=False, message="连不上 58611")
+
+
+def test_check_connection_reports_unconfirmed(tmp_path: Path) -> None:
+    """没确认地址时，check_connection 能把“去插件页确认”的提示带回平台。"""
+    entry = make_entry(tmp_path, kind="datasource")
+    with PluginSession(entry, limits=FAST) as s:
+        status = s.call("check_connection")
+    assert status.ok is False and "插件页确认" in status.message
 
 
 @pytest.mark.parametrize("address", ["miniqmt.lan:58610", "8.8.8.8:58610"])

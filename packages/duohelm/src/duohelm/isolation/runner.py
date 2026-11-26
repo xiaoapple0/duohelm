@@ -176,17 +176,20 @@ class PluginSession:
         limits: Limits | None = None,
         cancel: threading.Event | None = None,
         log: Callable[[str], None] | None = None,
-        endpoints: Mapping[str, str] | None = None,
-        network: Sequence[str] = (),
+        endpoints: Mapping[str, str],
+        network: Sequence[str],
     ) -> None:
-        """``endpoints``：用户确认过的连接地址（endpoint id -> ``主机:端口``），通常来自
+        """``endpoints`` 和 ``network`` 必须显式传入（可以为空），调用方没法漏传（#24）。
+        平台代码应当用 :func:`session_for`，它从用户配置里取这两项。
+
+        ``endpoints``：用户确认过的连接地址（endpoint id -> ``主机:端口``），通常来自
         :meth:`duohelm.endpoints.EndpointStore.addresses_for`。只有这里的地址交给插件并放行；
         没给的 endpoint，插件的 ``endpoint()`` 报错（提示用户去插件页确认），也不放行。
         启动子进程之前按 scope 再校验一次。
 
         ``network``：放行的清单 network 地址，来自
-        :meth:`duohelm.endpoints.EndpointStore.network_for`（用户确认过才有）。默认为空，
-        即不放行清单的 network；必须是清单 network 的子集。"""
+        :meth:`duohelm.endpoints.EndpointStore.network_for`（用户确认过才有）。为空时不放行
+        清单的 network；必须是清单 network 的子集。"""
         if entry.status is not PluginStatus.READY or entry.manifest is None:
             raise PluginRunError("load", f"插件 {entry.id} 的状态是 {entry.status}，不能运行")
         info = entry.manifest.plugin
@@ -202,7 +205,7 @@ class PluginSession:
         self._kind = info.kind
         self._entrypoint = info.entrypoint
         self._manifest = entry.manifest
-        self._endpoint_texts: dict[str, str] = dict(endpoints or {})
+        self._endpoint_texts: dict[str, str] = dict(endpoints)
         self._network = list(network)
 
         self.workdir: Path | None = None

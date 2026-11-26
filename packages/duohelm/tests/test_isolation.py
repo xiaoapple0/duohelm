@@ -167,8 +167,14 @@ def data() -> pl.DataFrame:
 FAST = Limits(call_timeout_s=30, startup_timeout_s=60, poll_interval_s=0.1)
 
 
-def run(entry: PluginEntry, factor_id: str, data: pl.DataFrame, **kw: object) -> pl.DataFrame:
-    with PluginSession(entry, limits=kw.pop("limits", FAST), **kw) as s:  # type: ignore[arg-type]
+def run(entry: PluginEntry, factor_id: str, data: pl.DataFrame, **kw: Any) -> pl.DataFrame:
+    with PluginSession(
+        entry,
+        limits=kw.pop("limits", FAST),
+        endpoints=kw.pop("endpoints", {}),
+        network=kw.pop("network", ()),
+        **kw,
+    ) as s:
         return s.compute(factor_id, data)
 
 
@@ -194,7 +200,7 @@ def test_compute_roundtrip(entry: PluginEntry, data: pl.DataFrame) -> None:
 
 
 def test_session_reuses_process(entry: PluginEntry, data: pl.DataFrame) -> None:
-    with PluginSession(entry, limits=FAST) as s:
+    with PluginSession(entry, limits=FAST, endpoints={}, network=()) as s:
         first = s.call("compute", "calls", data)
         second = s.call("compute", "calls", data)
         assert first["pid"][0] == second["pid"][0] == s.pid
@@ -202,7 +208,7 @@ def test_session_reuses_process(entry: PluginEntry, data: pl.DataFrame) -> None:
 
 
 def test_child_runs_isolated_in_workdir(entry: PluginEntry, data: pl.DataFrame) -> None:
-    with PluginSession(entry, limits=FAST) as s:
+    with PluginSession(entry, limits=FAST, endpoints={}, network=()) as s:
         out = s.call("compute", "flags", data)
         assert s.workdir is not None
         assert out["isolated"][0] == 1
@@ -213,7 +219,7 @@ def test_child_runs_isolated_in_workdir(entry: PluginEntry, data: pl.DataFrame) 
 def test_close_removes_workdir_even_with_result_alive(
     entry: PluginEntry, data: pl.DataFrame
 ) -> None:
-    with PluginSession(entry, limits=FAST) as s:
+    with PluginSession(entry, limits=FAST, endpoints={}, network=()) as s:
         out = s.compute("double", data)
         workdir = s.workdir
     assert workdir is not None
@@ -222,7 +228,7 @@ def test_close_removes_workdir_even_with_result_alive(
 
 
 def test_call_after_close(entry: PluginEntry, data: pl.DataFrame) -> None:
-    s = PluginSession(entry, limits=FAST)
+    s = PluginSession(entry, limits=FAST, endpoints={}, network=())
     with s:
         pass
     with pytest.raises(PluginRunError):
@@ -234,7 +240,7 @@ def test_call_after_close(entry: PluginEntry, data: pl.DataFrame) -> None:
 
 def test_timeout_kills_process(entry: PluginEntry, data: pl.DataFrame) -> None:
     limits = Limits(call_timeout_s=1, poll_interval_s=0.1)
-    with PluginSession(entry, limits=limits) as s:
+    with PluginSession(entry, limits=limits, endpoints={}, network=()) as s:
         pid = s.pid
         assert pid is not None
         start = time.monotonic()
@@ -250,7 +256,7 @@ def test_timeout_kills_grandchildren(
 ) -> None:
     pid_file = tmp_path / "grandchild.pid"
     limits = Limits(call_timeout_s=5, poll_interval_s=0.1)
-    with PluginSession(entry, limits=limits) as s:
+    with PluginSession(entry, limits=limits, endpoints={}, network=()) as s:
         with pytest.raises(PluginRunError) as info:
             s.compute(f"spawn_sleeper:{pid_file}", data)
         assert info.value.reason == "timeout"
@@ -261,14 +267,17 @@ def test_timeout_kills_grandchildren(
 
 def test_memory_limit(entry: PluginEntry, data: pl.DataFrame) -> None:
     limits = Limits(call_timeout_s=60, memory_bytes=400 * 1024**2, poll_interval_s=0.1)
-    with PluginSession(entry, limits=limits) as s, pytest.raises(PluginRunError) as info:
+    with (
+        PluginSession(entry, limits=limits, endpoints={}, network=()) as s,
+        pytest.raises(PluginRunError) as info,
+    ):
         s.compute("hog", data)
     assert info.value.reason == "memory"
 
 
 def test_cancel_kills_process(entry: PluginEntry, data: pl.DataFrame) -> None:
     cancel = threading.Event()
-    with PluginSession(entry, limits=FAST, cancel=cancel) as s:
+    with PluginSession(entry, limits=FAST, cancel=cancel, endpoints={}, network=()) as s:
         pid = s.pid
         assert pid is not None
         threading.Timer(1.0, cancel.set).start()
@@ -285,7 +294,7 @@ def test_cancel_kills_process(entry: PluginEntry, data: pl.DataFrame) -> None:
 
 def test_print_does_not_corrupt_protocol(entry: PluginEntry, data: pl.DataFrame) -> None:
     lines: list[str] = []
-    with PluginSession(entry, limits=FAST, log=lines.append) as s:
+    with PluginSession(entry, limits=FAST, log=lines.append, endpoints={}, network=()) as s:
         out = s.compute("print", data)
         s.compute("double", data)
     assert out.height == 3
@@ -296,7 +305,7 @@ def test_print_does_not_corrupt_protocol(entry: PluginEntry, data: pl.DataFrame)
 def test_stderr_is_capped(entry: PluginEntry, data: pl.DataFrame) -> None:
     lines: list[str] = []
     limits = Limits(call_timeout_s=30, stderr_bytes=2_000, poll_interval_s=0.1)
-    with PluginSession(entry, limits=limits, log=lines.append) as s:
+    with PluginSession(entry, limits=limits, log=lines.append, endpoints={}, network=()) as s:
         s.compute("stderr:5000", data)  # 约 500 KB
         s.compute("double", data)  # 管道一直被读空，插件没有卡住
     notices = [line for line in lines if "后续输出已丢弃" in line]
@@ -318,7 +327,7 @@ def test_secrets_not_inherited(
     monkeypatch.setenv("DUOHELM_TEST_SECRET", "s3cret")
     monkeypatch.setenv("MY_API_TOKEN", "t0ken")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:1")
-    with PluginSession(entry, limits=FAST) as s:
+    with PluginSession(entry, limits=FAST, endpoints={}, network=()) as s:
         keys = {k.upper() for k in s.call("compute", "env", data)["key"].to_list()}
     assert "DUOHELM_TEST_SECRET" not in keys
     assert "MY_API_TOKEN" not in keys
@@ -366,7 +375,10 @@ def test_network_blocked(
     entry: PluginEntry, data: pl.DataFrame, listener: tuple[int, list[str]], how: str
 ) -> None:
     port, seen = listener
-    with PluginSession(entry, limits=FAST) as s, pytest.raises(PluginRunError) as info:
+    with (
+        PluginSession(entry, limits=FAST, endpoints={}, network=()) as s,
+        pytest.raises(PluginRunError) as info,
+    ):
         s.compute(f"{how}:{port}", data)
     assert info.value.reason == "plugin_error"
     assert "没有网络权限" in info.value.message
@@ -382,7 +394,7 @@ def test_socketpair_still_works(entry: PluginEntry, data: pl.DataFrame) -> None:
 
 
 def test_plugin_exception(entry: PluginEntry, data: pl.DataFrame) -> None:
-    with PluginSession(entry, limits=FAST) as s:
+    with PluginSession(entry, limits=FAST, endpoints={}, network=()) as s:
         with pytest.raises(PluginRunError) as info:
             s.compute("raise", data)
         assert info.value.reason == "plugin_error"
@@ -394,7 +406,10 @@ def test_plugin_exception(entry: PluginEntry, data: pl.DataFrame) -> None:
 
 
 def test_crash(entry: PluginEntry, data: pl.DataFrame) -> None:
-    with PluginSession(entry, limits=FAST) as s, pytest.raises(PluginRunError) as info:
+    with (
+        PluginSession(entry, limits=FAST, endpoints={}, network=()) as s,
+        pytest.raises(PluginRunError) as info,
+    ):
         s.compute("exit", data)
     assert info.value.reason == "crashed"
     assert "3" in info.value.message
@@ -414,20 +429,29 @@ def test_output_checked(entry: PluginEntry, data: pl.DataFrame) -> None:
 
 
 def test_result_too_large(entry: PluginEntry, data: pl.DataFrame) -> None:
-    with PluginSession(entry, limits=FAST) as s, pytest.raises(PluginRunError) as info:
+    with (
+        PluginSession(entry, limits=FAST, endpoints={}, network=()) as s,
+        pytest.raises(PluginRunError) as info,
+    ):
         s.call("compute", "huge_result", data)
     assert info.value.reason == "protocol"
 
 
 def test_method_not_allowed(entry: PluginEntry, data: pl.DataFrame) -> None:
-    with PluginSession(entry, limits=FAST) as s, pytest.raises(PluginRunError) as info:
+    with (
+        PluginSession(entry, limits=FAST, endpoints={}, network=()) as s,
+        pytest.raises(PluginRunError) as info,
+    ):
         s.call("__init__")
     assert info.value.reason == "protocol"
 
 
 def test_load_error(tmp_path: Path) -> None:
     broken = make_entry(tmp_path / "plugins", "iso-broken", "raise ImportError('nope')\n")
-    with pytest.raises(PluginRunError) as info, PluginSession(broken, limits=FAST):
+    with (
+        pytest.raises(PluginRunError) as info,
+        PluginSession(broken, limits=FAST, endpoints={}, network=()),
+    ):
         pass
     assert info.value.reason == "load"
     assert "nope" in info.value.message
@@ -436,8 +460,16 @@ def test_load_error(tmp_path: Path) -> None:
 def test_not_ready_plugin_refused(entry: PluginEntry) -> None:
 
     with pytest.raises(PluginRunError) as info:
-        PluginSession(replace(entry, status=PluginStatus.BLOCKED))
+        PluginSession(replace(entry, status=PluginStatus.BLOCKED), endpoints={}, network=())
     assert info.value.reason == "load"
+
+
+def test_endpoints_and_network_must_be_passed(entry: PluginEntry) -> None:
+    """直接构造 PluginSession 时必须显式传 endpoints 和 network，不能漏传（#24）。"""
+    with pytest.raises(TypeError, match="endpoints"):
+        PluginSession(entry, network=())  # pyright: ignore[reportCallIssue]
+    with pytest.raises(TypeError, match="network"):
+        PluginSession(entry, endpoints={})  # pyright: ignore[reportCallIssue]
 
 
 # ---- 协议 ----
@@ -509,7 +541,7 @@ def test_limits_from_env() -> None:
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object")
 def test_windows_interpreter_in_job(entry: PluginEntry) -> None:
     # venv 的 python.exe 是启动器：真正运行插件的解释器也必须在 Job 里
-    with PluginSession(entry, limits=FAST) as s:
+    with PluginSession(entry, limits=FAST, endpoints={}, network=()) as s:
         job = s._job  # pyright: ignore[reportPrivateUsage]
         assert job is not None
         assert s.pid is not None
@@ -526,7 +558,7 @@ def test_child_start_flags(entry: PluginEntry, monkeypatch: pytest.MonkeyPatch) 
         return real_popen(*args, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", spy)  # runner 用的就是这个模块
-    with PluginSession(entry, limits=FAST):
+    with PluginSession(entry, limits=FAST, endpoints={}, network=()):
         pass
     assert len(seen) == 1
     flags = seen[0]
@@ -556,7 +588,7 @@ def test_job_assign_failure_kills_suspended_process(
     monkeypatch.setattr(_windows.Job, "assign", failing_assign)
     monkeypatch.setattr(runner, "_resume", resumed.append)
 
-    session = PluginSession(entry, limits=FAST)
+    session = PluginSession(entry, limits=FAST, endpoints={}, network=())
     try:
         with pytest.raises(PluginRunError) as info:
             session.start()
@@ -646,7 +678,7 @@ def test_datasource_security_methods(tmp_path: Path) -> None:
     (path / "duohelm-plugin.toml").write_text(DATASOURCE_MANIFEST, encoding="utf-8")
     [entry] = PluginRegistry([root]).scan()
     assert entry.status is PluginStatus.READY, entry.problems
-    with PluginSession(entry, limits=FAST) as s:
+    with PluginSession(entry, limits=FAST, endpoints={}, network=()) as s:
         listed = s.call("securities")
         everything = s.call("securities", include_delisted=True)
         found = s.call("lookup_securities", ["600087.SH", "609999.SH"])

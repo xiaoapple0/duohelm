@@ -31,13 +31,14 @@ id = "my-factors"            # 小写字母开头，只含小写字母、数字�
 name = "自有因子"
 version = "1.2.0"            # 语义化版本
 kind = "factor"
-sdk = ">=0.2,<0.3"           # 兼容的 SDK 版本范围
+sdk = ">=0.3,<0.4"           # 兼容的 SDK 版本范围
 author = "me"
 description = "量价类自有因子"
 entrypoint = "my_factors:plugin"   # 代码式插件的入口：模块:对象。纯表达式因子插件可省略
 
 [permissions]
 network = []                 # 需要访问的主机名。默认没有网络
+# 需要用户配置地址的服务另用 [[permissions.endpoints]]，见下文
 
 [[requires]]                 # 依赖的其他插件
 id = "ops-industry"
@@ -54,6 +55,38 @@ description = "价格和成交量排名的10日相关系数取反"
 ```
 
 清单的权威定义是 `packages/duohelm-sdk/src/duohelm_sdk/manifest.py`。选用 TOML 是因为 Python 标准库自带解析器，SDK 不需要额外依赖。
+
+### 用户可配置的连接地址（SDK 0.3 起）
+
+需要连接用户自己的服务（例如局域网里另一台机器上的 MiniQMT）时，插件不把地址写进清单或代码，而是声明一个 endpoint：
+
+```toml
+[[permissions.endpoints]]
+id = "miniqmt"                    # 小写字母开头，只含小写字母、数字、下划线
+description = "MiniQMT 行情服务"   # 在平台的确认弹窗里给用户看
+default = "127.0.0.1:58610"       # 默认地址，必须符合 scope
+scope = "lan"                     # 用户能填的地址范围
+```
+
+插件代码用 `duohelm_sdk.endpoint("miniqmt", default="127.0.0.1:58610")` 取得地址（`Address(host, port)`）。在平台里运行时，返回用户确认过的地址（没有配置的用清单的 `default`），代码里的 `default` 被忽略；不在平台里运行时（测试、独立脚本），返回代码里的 `default`。
+
+scope 规则（`duohelm_sdk.endpoints.parse_address`）：
+
+| scope | 接受 | 不接受 |
+|---|---|---|
+| `loopback` | 只有 `127.0.0.1`、`::1` | 主机名（包括 `localhost`）、其他地址 |
+| `lan` | **只接受 IP 地址**：本机（`127.0.0.1`、`::1`）、10/8、172.16/12、192.168/16、fc00::/7 | 主机名（防止 DNS 重绑定）、公网地址、169.254/16 等链路本地地址 |
+| `internet` | IP 地址或主机名；用户保存时需要额外确认 | — |
+
+所有 scope 都要求写端口，不接受 `0.0.0.0`、组播地址、带网卡后缀的 IPv6 地址、协议和路径。
+
+平台的流程（随平台实现一起落地）：
+
+- 用户在插件页填写地址并确认后，平台才保存。地址保存在 `DUOHELM_HOME` 下的数据库里，不进任何仓库
+- 地址是否符合 scope 由平台校验两次：**保存时**一次，**启动插件子进程、传地址之前**再一次
+- 需要重新确认的情况：清单里 `[[permissions.endpoints]]` 这一节变了（按这一节的哈希判断，插件升版本、改描述等清单其他部分的改动不算），或用户改了地址。重新确认之前，插件只能用 `default`
+- 每次确认都记审计日志；质量报告和任务日志里不写具体地址
+- Python 层的网络拦截按“`network` + 已确认的 endpoint”逐个精确放行主机和端口。原生扩展（如 xtquant）不经过这层拦截，靠的是平台只把确认过的地址传给插件（威胁模型见下）
 
 ## 加载流程
 
@@ -151,6 +184,20 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
   - 清单字段（如插件的 `kind`）不在此列：清单受 `sdk` 版本范围约束，用了新取值的插件会被判为 SDK 不兼容，而不是被当作错误
 
 ### 变更记录
+
+**SDK 0.3.0（M1）**，只有新增，但清单多了字段，旧版平台无法解析（清单不接受未知字段），所以升次版本号：
+
+- 清单新增可选的 `[[permissions.endpoints]]`（`manifest.Endpoint`：`id`、`description`、`default`、`scope`），见上文“用户可配置的连接地址”
+- 新增 `duohelm_sdk.endpoints`：`EndpointScope`（`loopback` / `lan` / `internet`）、`Address`、`parse_address()`、`AddressError`
+- 新增 `duohelm_sdk.context`：`endpoint()`、`in_platform()`、`EndpointNotConfiguredError`
+- 新增可选协议 `SupportsConnectionCheck`：`check_connection() -> ConnectionStatus(ok, message)`。平台在同步任务开始时，如果插件实现了它就先调用一次，`ok` 为 False 时任务直接失败。它不是 `DataSourcePlugin` 的必需方法
+- 以上名字都加入了 `duohelm_sdk.__all__`
+
+迁移：
+
+- 不用 endpoints 的插件不需要改代码，把清单的 `sdk` 放宽为 `">=0.2,<0.4"` 即可（0.3 只有新增，0.2 的插件在 0.3 的平台上照常运行）
+- 用 endpoints 的插件，清单的 `sdk` 必须写 `">=0.3,<0.4"`
+- 官方插件：xtdata 改用 `endpoint("miniqmt")`、实现 `check_connection`；eltdx 只放宽 `sdk` 范围。两者在插件仓库单独提 PR
 
 **SDK 0.2.0（M1）**，不兼容：
 

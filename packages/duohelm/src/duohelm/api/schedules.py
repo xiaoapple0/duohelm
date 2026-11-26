@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from duohelm.registry import PluginEntry, PluginStatus
 from duohelm.tasks.schedule import (
     ScheduleError,
     Scheduler,
@@ -24,6 +26,10 @@ class ScheduleOut(BaseModel):
     """每个交易日触发的时刻，HH:MM，北京时间。"""
     timezone: str
     last_trigger_date: date | None
+    plugin_warning: str | None
+    """启用时插件状态不是 ready 的说明；仍然保存，触发时 data.sync 会失败。"""
+    needs_full_sync: bool
+    """已启用，但当前快照里没有日线：不会自动触发，需要先手动做一次全量同步。"""
     next_run_at: datetime | None
     """下次触发时间（带 +08:00 偏移）。未启用时为空；日历没覆盖的日子只按周末判断，是预估。"""
 
@@ -34,8 +40,27 @@ class SchedulePatch(BaseModel):
     time: str | None = None
 
 
-def schedule_router(store: ScheduleStore, scheduler: Scheduler) -> APIRouter:
+def schedule_router(
+    store: ScheduleStore, scheduler: Scheduler, scan: Callable[[], list[PluginEntry]]
+) -> APIRouter:
     router = APIRouter()
+
+    def plugin_warning(plugin_id: str | None, enabled: bool) -> str | None:
+        if not enabled or not plugin_id:
+            return None
+        entry = next((e for e in scan() if e.id == plugin_id), None)
+        if entry is None or entry.status is PluginStatus.READY:
+            return None
+        return f"插件 {plugin_id} 的状态是 {entry.status}，定时同步触发时会失败"
+
+    def check_plugin(plugin_id: str) -> None:
+        entry = next((e for e in scan() if e.id == plugin_id), None)
+        if entry is None:
+            raise ScheduleError(f"找不到插件 {plugin_id}")
+        if entry.manifest is not None and entry.manifest.plugin.kind != "datasource":
+            raise ScheduleError(
+                f"插件 {plugin_id} 不是行情源（kind 为 {entry.manifest.plugin.kind}）"
+            )
 
     def out() -> ScheduleOut:
         cfg = store.get()
@@ -45,6 +70,8 @@ def schedule_router(store: ScheduleStore, scheduler: Scheduler) -> APIRouter:
             time=f"{cfg.run_time:%H:%M}",
             timezone=TIMEZONE,
             last_trigger_date=cfg.last_trigger_date,
+            plugin_warning=plugin_warning(cfg.plugin_id, cfg.enabled),
+            needs_full_sync=scheduler.needs_full_sync(),
             next_run_at=scheduler.next_run_at(),
         )
 
@@ -53,6 +80,11 @@ def schedule_router(store: ScheduleStore, scheduler: Scheduler) -> APIRouter:
 
     def patch_schedule(body: SchedulePatch) -> ScheduleOut:
         try:
+            current = store.get()
+            effective = body.plugin_id.strip() if body.plugin_id is not None else current.plugin_id
+            will_enable = current.enabled if body.enabled is None else body.enabled
+            if will_enable and effective:
+                check_plugin(effective)
             store.update(
                 now=scheduler.now(),
                 enabled=body.enabled,

@@ -14,13 +14,31 @@ from fastapi.testclient import TestClient
 
 from duohelm.api import create_app
 from duohelm.settings import Settings
+from duohelm_sdk import MANIFEST_FILENAME
 
 SH = timezone(timedelta(hours=8))
 LOCAL = "http://127.0.0.1:8765"
 URL = "/api/schedules/data-sync"
 
 
+def add_plugin(tmp_path: Path, plugin_id: str, kind: str, sdk: str = ">=0.4,<0.5") -> None:
+    path = tmp_path / "plugins" / plugin_id
+    path.mkdir(parents=True)
+    lines = [
+        "[plugin]",
+        f'id = "{plugin_id}"',
+        f'name = "{plugin_id}"',
+        'version = "1.0.0"',
+        f'kind = "{kind}"',
+        f'sdk = "{sdk}"',
+        f'entrypoint = "{plugin_id}:plugin"',
+    ]
+    (path / MANIFEST_FILENAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def make(tmp_path: Path, at: datetime) -> TestClient:
+    add_plugin(tmp_path, "xtdata", "datasource")
+    add_plugin(tmp_path, "eltdx", "datasource")
     settings = Settings(home=tmp_path)
     app = create_app(settings, now=lambda: at)
     return TestClient(app, base_url=LOCAL, headers={"Origin": LOCAL})
@@ -35,6 +53,8 @@ def test_default_is_disabled(tmp_path: Path) -> None:
         "time": "16:00",
         "timezone": "Asia/Shanghai",
         "last_trigger_date": None,
+        "plugin_warning": None,
+        "needs_full_sync": False,
         "next_run_at": None,
     }
 
@@ -68,3 +88,33 @@ def test_enable_without_plugin_is_422(tmp_path: Path) -> None:
     client = make(tmp_path, datetime(2024, 1, 2, 10, 0, tzinfo=SH))
     assert client.patch(URL, json={"enabled": True}).status_code == 422
     assert client.get(URL).json()["enabled"] is False
+
+
+def test_enable_unknown_plugin_is_422(tmp_path: Path) -> None:
+    client = make(tmp_path, datetime(2024, 1, 2, 10, 0, tzinfo=SH))
+    resp = client.patch(URL, json={"enabled": True, "plugin_id": "nope"})
+    assert resp.status_code == 422
+    assert "找不到" in resp.json()["detail"]
+    assert client.get(URL).json()["enabled"] is False
+
+
+def test_enable_non_datasource_is_422(tmp_path: Path) -> None:
+    add_plugin(tmp_path, "myop", "operator")
+    client = make(tmp_path, datetime(2024, 1, 2, 10, 0, tzinfo=SH))
+    resp = client.patch(URL, json={"enabled": True, "plugin_id": "myop"})
+    assert resp.status_code == 422
+    assert "行情源" in resp.json()["detail"]
+
+
+def test_enable_not_ready_plugin_saves_with_warning(tmp_path: Path) -> None:
+    add_plugin(tmp_path, "oldsrc", "datasource", sdk=">=9.0")  # SDK 版本不兼容，状态不是 ready
+    client = make(tmp_path, datetime(2024, 1, 2, 10, 0, tzinfo=SH))
+    body = client.patch(URL, json={"enabled": True, "plugin_id": "oldsrc"}).json()
+    assert body["enabled"] is True
+    assert "oldsrc" in body["plugin_warning"]
+
+
+def test_needs_full_sync_when_no_snapshot(tmp_path: Path) -> None:
+    client = make(tmp_path, datetime(2024, 1, 2, 10, 0, tzinfo=SH))
+    body = client.patch(URL, json={"enabled": True, "plugin_id": "xtdata"}).json()
+    assert body["needs_full_sync"] is True

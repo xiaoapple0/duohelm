@@ -29,15 +29,26 @@ logger = logging.getLogger(__name__)
 SCHEDULE_NAME = "data.sync"
 DEDUPE_KEY = "schedule:data.sync"
 DEFAULT_TIME = time(16, 0)
-INCREMENTAL_WINDOW_DAYS = 30
-"""增量同步的 start：触发当天往前多少个自然日。"""
+OVERLAP_DAYS = 7
+"""增量同步的 start：当前快照日历的最新日期往前多少个自然日，用来覆盖最后几天的修正。"""
 CHECK_INTERVAL_S = 30.0
 LOOKAHEAD_DAYS = 14
 
 Now = Callable[[], datetime]
 """返回当前时间（带时区）。测试注入假时钟。"""
-CalendarReader = Callable[[], frozenset[date] | None]
-"""CN 交易日历；读不到（还没有快照、读取失败）时为 None。"""
+
+
+@dataclass(frozen=True)
+class DataState:
+    """当前快照里和定时同步有关的信息。"""
+
+    calendar: frozenset[date] | None
+    """CN 交易日历；读不到（还没有快照、读取失败）时为 None。"""
+    has_bars: bool
+    """快照里有日线。没有时必须先手动做一次全量同步。"""
+
+
+StateReader = Callable[[], DataState]
 
 
 def beijing_now() -> datetime:
@@ -190,17 +201,19 @@ def is_trading_day(day: date, calendar: frozenset[date] | None) -> bool:
     return True
 
 
-def read_cn_calendar(data: DataStore) -> frozenset[date] | None:
+def read_data_state(data: DataStore) -> DataState:
     try:
-        if data.head() is None:
-            return None
+        head = data.head()
+        if head is None:
+            return DataState(None, False)
+        has_bars = bool(data.manifest(head).datasets.get("bars_1d"))
         df = data.read("calendar")
         days = df.filter(df["market"] == MARKET)["date"].to_list()
     except Exception:
-        # 读不到是“不知道”，不是“不是交易日”：按没覆盖处理。
-        logger.warning("读取交易日历失败，按日历未覆盖处理", exc_info=True)
-        return None
-    return frozenset(days) if days else None
+        # 读不到是“不知道”，不是“不是交易日”，也不是“没有日线”：不触发，等下个周期。
+        logger.warning("读取当前快照失败", exc_info=True)
+        raise
+    return DataState(frozenset(days) if days else None, has_bars)
 
 
 class Scheduler:
@@ -209,14 +222,25 @@ class Scheduler:
         schedules: ScheduleStore,
         tasks: TaskStore,
         types: TaskTypeRegistry,
-        calendar: CalendarReader,
+        state: StateReader,
         now: Now = beijing_now,
     ) -> None:
         self._schedules = schedules
         self._tasks = tasks
         self._types = types
-        self._calendar = calendar
+        self._state = state
         self._now = now
+
+    def state(self) -> DataState:
+        try:
+            return self._state()
+        except Exception:
+            return DataState(None, False)
+
+    def needs_full_sync(self) -> bool:
+        """已启用，但快照里没有日线：定时同步不会触发。"""
+        cfg = self._schedules.get()
+        return cfg.enabled and not self.state().has_bars
 
     def now(self) -> datetime:
         return self._now().astimezone(SHANGHAI)
@@ -230,7 +254,8 @@ class Scheduler:
         today = current.date()
         if cfg.last_trigger_date == today or current.time() < cfg.run_time:
             return None
-        if not is_trading_day(today, self._calendar()):
+        state = self._state()
+        if not is_trading_day(today, state.calendar):
             # 非交易日当天不会再变成交易日，记为已处理，避免每个周期都读日历。
             self._schedules.mark_triggered(today)
             logger.info("%s 不是交易日，不触发定时同步", today)
@@ -242,7 +267,12 @@ class Scheduler:
                 today,
                 f"{cfg.run_time:%H:%M}",
             )
-        start = today - timedelta(days=INCREMENTAL_WINDOW_DAYS)
+        if not state.has_bars or not state.calendar:
+            logger.warning("当前快照没有日线，不自动触发定时同步：需要先手动做一次全量同步")
+            self._schedules.mark_triggered(today)
+            return None
+        # 从快照已有数据的最新日期往前一小段开始，停机多久都不会漏掉中间的日子
+        start = min(max(state.calendar) - timedelta(days=OVERLAP_DAYS), today)
         params = self._types.validate_params(
             "data.sync", {"plugin_id": cfg.plugin_id, "start": start.isoformat()}
         )
@@ -267,7 +297,7 @@ class Scheduler:
         if not cfg.enabled or not cfg.plugin_id:
             return None
         current = self._now().astimezone(SHANGHAI)
-        calendar = self._calendar()
+        calendar = self.state().calendar
         for offset in range(LOOKAHEAD_DAYS + 1):
             day = current.date() + timedelta(days=offset)
             if day == cfg.last_trigger_date:

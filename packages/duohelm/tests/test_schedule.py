@@ -19,6 +19,7 @@ from duohelm.tasks import store as store_module
 from duohelm.tasks.builtin import builtin_task_types
 from duohelm.tasks.schedule import (
     DEDUPE_KEY,
+    DataState,
     ScheduleError,
     Scheduler,
     ScheduleStore,
@@ -59,10 +60,17 @@ class Env:
         self.schedules = ScheduleStore(self.tasks)
         self.now = FakeNow(at)
         self.calendar = calendar
+        self.has_bars = True
         self.scheduler = self.make_scheduler()
 
     def make_scheduler(self) -> Scheduler:
-        return Scheduler(self.schedules, self.tasks, self.types, lambda: self.calendar, self.now)
+        return Scheduler(
+            self.schedules,
+            self.tasks,
+            self.types,
+            lambda: DataState(self.calendar, self.has_bars),
+            self.now,
+        )
 
     def enable(self, plugin_id: str = "xtdata", run_time: str = "16:00") -> None:
         self.schedules.update(
@@ -103,8 +111,10 @@ def test_triggers_on_trading_day_once_with_incremental_params(env: Env) -> None:
     assert task.dedupe_key == DEDUPE_KEY
     assert json.loads(task.params) == {
         "plugin_id": "xtdata",
-        "start": "2023-12-03",  # 触发当天往前 30 个自然日，end 不传（用默认值）
+        # 快照日历的最新日期（2024-01-01）往前 7 个自然日；end 不传，用默认值
+        "start": "2023-12-25",
         "end": None,
+        "indexes": None,  # 用 data.sync 的默认指数
     }
 
     # 同一天再检查不会重复提交（即使任务已经结束）
@@ -144,11 +154,30 @@ def test_calendar_not_covering_today_still_triggers(env: Env) -> None:
     assert env.scheduler.tick() is not None
 
 
-def test_no_calendar_still_triggers_on_weekday(env: Env) -> None:
-    env.calendar = None  # 还没有快照，或读取失败
+def test_no_bars_does_not_trigger_and_asks_for_full_sync(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    env.has_bars = False  # 快照里没有日线（或还没有快照）
     env.enable()
+    assert env.scheduler.needs_full_sync()
     env.now.at = bj("2024-01-02", "16:00")
+    with caplog.at_level(logging.WARNING, logger="duohelm.tasks.schedule"):
+        assert env.scheduler.tick() is None
+    assert "全量同步" in caplog.text
+    assert env.sync_tasks() == []
+    env.has_bars = True
+    assert not env.scheduler.needs_full_sync()
+
+
+def test_start_follows_latest_snapshot_date_after_long_outage(tmp_path: Path) -> None:
+    # 快照只到 2023-12-01，停机一个多月：start 从快照最新日期往前 7 天，不会漏掉中间的日子
+    calendar = trading_days(date(2023, 11, 1), date(2023, 12, 1))
+    env = Env(tmp_path, bj("2024-01-15", "10:00"), calendar)
+    env.enable()
+    env.now.at = bj("2024-01-15", "16:00")
     assert env.scheduler.tick() is not None
+    [task] = env.sync_tasks()
+    assert json.loads(task.params)["start"] == "2023-11-24"
 
 
 def test_missed_trigger_runs_once_same_day(env: Env, caplog: pytest.LogCaptureFixture) -> None:
@@ -207,7 +236,7 @@ def test_local_timezone_utc_minus_5_still_uses_beijing_time(env: Env) -> None:
     env.now.at = datetime(2024, 1, 2, 3, 30, tzinfo=NY)
     assert env.scheduler.tick() is not None
     [task] = env.sync_tasks()
-    assert json.loads(task.params)["start"] == "2023-12-03"
+    assert json.loads(task.params)["start"] == "2023-12-25"
     assert env.schedules.get().last_trigger_date == date(2024, 1, 2)
     # 同一个时刻换成 UTC 表示，结果一致
     assert env.now.at.astimezone(UTC).date() == date(2024, 1, 2)

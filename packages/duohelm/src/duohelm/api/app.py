@@ -21,7 +21,7 @@ from duohelm.settings import Settings
 from duohelm.storage import DataStore
 from duohelm.tasks import TaskStore, TaskTypeRegistry, Worker
 from duohelm.tasks.builtin import builtin_task_types
-from duohelm.tasks.schedule import Now, Scheduler, ScheduleStore, beijing_now, read_cn_calendar
+from duohelm.tasks.schedule import Now, Scheduler, ScheduleStore, beijing_now, read_data_state
 from duohelm_sdk import SDK_VERSION
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ def create_app(
         schedules,
         store,
         task_types,
-        lambda: read_cn_calendar(DataStore(settings.data_dir)),
+        lambda: read_data_state(DataStore(settings.data_dir)),
         now,
     )
 
@@ -95,7 +95,7 @@ def create_app(
     app = FastAPI(title="DuoHelm", version=__version__, lifespan=lifespan)
     install_origin_guard(app, settings)
     app.include_router(task_router(store, task_types))
-    app.include_router(schedule_router(schedules, scheduler))
+    app.include_router(schedule_router(schedules, scheduler, registry.scan))
     app.include_router(plugin_router(registry, endpoints))
 
     def health() -> HealthResponse:

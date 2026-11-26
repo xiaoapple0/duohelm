@@ -590,7 +590,9 @@ def test_security_listed_and_delisted_between_syncs_is_found(
     behave(plugin, lists_delisted=False)  # 现在是已退市的证券
     age_not_found(settings, 8)
     store, task_id = run(settings)
-    assert result_of(store, task_id).rescanned >= 1
+    assert (
+        result_of(store, task_id).rescanned == 10
+    )  # 13 个区间代码，去掉代码表里的 2 个和找到过的 600001.SH
     data = DataStore(settings.data_dir)
     row = data.read("securities").filter(pl.col("symbol") == "600005.SH").row(0, named=True)
     assert row["delist_date"] == date(2024, 1, 3)
@@ -787,6 +789,15 @@ def test_params_validation() -> None:
     with pytest.raises(pydantic.ValidationError):
         SyncParams.model_validate({"plugin_id": "p", "extra": 1})
     assert SyncParams(plugin_id="p").start == date(1990, 12, 19)
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), -1, 3651])
+def test_rescan_days_validation(bad: float) -> None:
+    """inf 会让重扫截止时间溢出，过大的值会超出 SQLite 的整数范围：都在参数校验里拒绝。"""
+    with pytest.raises(pydantic.ValidationError):
+        SyncParams(plugin_id="p", rescan_days=bad)
+    assert SyncParams(plugin_id="p", rescan_days=3650).rescan_days == 3650
+    assert SyncParams(plugin_id="p", rescan_days=0).rescan_days == 0
 
 
 def beijing(day: int, hour: int, minute: int = 0) -> datetime:

@@ -82,7 +82,7 @@ class SyncParams(TaskParams):
     """None 表示执行时最近一个已收盘的日子（见 :func:`last_closed_day`）。"""
     indexes: list[str] | None = None
     """保存成分快照的指数代码；None 表示默认的一组宽基指数，空列表表示不保存。"""
-    rescan_days: float = Field(default=DEFAULT_RESCAN_DAYS, ge=0)
+    rescan_days: float = Field(default=DEFAULT_RESCAN_DAYS, ge=0, le=3650, allow_inf_nan=False)
     """退市股扫描：“没找到”的代码距上次查询超过这么多天就重扫；0 表示每次同步都重扫。"""
 
     @field_validator("indexes")

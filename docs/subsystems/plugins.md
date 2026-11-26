@@ -99,11 +99,11 @@ scope 规则（`duohelm_sdk.endpoints.parse_address`）：
 - 地址是否符合 scope 由平台校验两次，用的都是 `duohelm_sdk.parse_address`：
   - **保存时**：`EndpointStore.confirm`，不合格返回 422
   - **启动插件子进程、传地址之前**：`PluginSession.start` 调用 `checked_addresses`，不合格时不启动子进程，报 `load` 错误。错误信息会进任务日志，只写 endpoint 和 scope，不写地址
-- 平台代码运行插件时用 `duohelm.isolation.session_for(entry, store)`，它从 `EndpointStore` 取出确认过的地址传给 `PluginSession`。直接构造 `PluginSession` 而不传 `endpoints` 时，插件拿不到任何 endpoint 的地址。**目前还没有平台代码运行插件**，同步任务（M1）是第一个调用方，接入时必须用 `session_for`（#24）
+- 平台代码运行插件时用 `duohelm.isolation.session_for(entry, store)`，它从 `EndpointStore` 取出确认过的地址和 network 传给 `PluginSession`。`PluginSession` 的 `endpoints` 和 `network` 是必填的关键字参数，没有默认值，调用方不能漏传（#24）。目前运行插件的平台代码是同步任务 `data.sync`（见 [data.md](data.md) 的“同步任务”），用的是 `session_for`
 - 需要重新确认的情况：清单里 `[[permissions.endpoints]]` 这一节变了。按这一节规范化 JSON 的 sha256 判断（`endpoints_digest`），插件升版本、改插件名称或说明、改 `network` 等清单其他部分的改动都不算；endpoint 自己的 `description`、`default`、`scope` 变了算。需要重新确认时，页面显示“需要重新确认，不能连接”；用户重新确认之前，插件拿不到地址（已保存的地址和 `default` 都不交给插件），也不放行
 - endpoint 的确认、清除和 network 的确认、撤销，都记进审计表 `permission_audit`（对象、旧值、新值、当时的哈希、时间），只在本机数据库里。普通日志、质量报告和任务日志里不写具体地址
-- 子进程收到 `start` 后、导入插件代码之前，按“**用户确认过的** `network` + 用户确认过的 endpoint 地址”设置网络白名单（`session_for` 从 `EndpointStore.network_for` 取 network，没确认时为空；直接构造 `PluginSession` 不传 `network` 时也为空；传入的 network 必须是清单的子集），并设置 `duohelm_sdk.endpoint()` 能取到的地址（只有确认过的；没确认的只传 id，`endpoint()` 据此报“还没有确认”）。白名单逐个精确匹配主机和端口；白名单里的主机名必须解析到公网 IP，解析出来的公网 IP 按主机名那一项的端口规则放行。原生扩展（如 xtquant）和插件启动的子进程不经过这层拦截：平台不交出没确认的地址，所以按 `endpoint()` 取地址的插件（包括用原生扩展连接的）在用户确认之前连不上；但插件代码自己写死地址、交给原生扩展去连，这层拦不住（威胁模型见下，操作系统层的隔离见 #7）
-- 实现了 `check_connection` 的插件，平台可以在隔离进程里调用它（同步任务里接入）
+- 子进程收到 `start` 后、导入插件代码之前，按“**用户确认过的** `network` + 用户确认过的 endpoint 地址”设置网络白名单（`session_for` 从 `EndpointStore.network_for` 取 network，没确认时为空；`network` 传空时也不放行；传入的 network 必须是清单的子集），并设置 `duohelm_sdk.endpoint()` 能取到的地址（只有确认过的；没确认的只传 id，`endpoint()` 据此报“还没有确认”）。白名单逐个精确匹配主机和端口；白名单里的主机名必须解析到公网 IP，解析出来的公网 IP 按主机名那一项的端口规则放行。原生扩展（如 xtquant）和插件启动的子进程不经过这层拦截：平台不交出没确认的地址，所以按 `endpoint()` 取地址的插件（包括用原生扩展连接的）在用户确认之前连不上；但插件代码自己写死地址、交给原生扩展去连，这层拦不住（威胁模型见下，操作系统层的隔离见 #7）
+- 实现了 `check_connection` 的插件，平台在隔离进程里调用它：`data.sync` 开始下载之前先调用，`ok=False` 时任务直接失败；没实现的插件跳过这一步（子进程报 `unsupported`）
 
 ## 加载流程
 
@@ -136,7 +136,7 @@ scope 规则（`duohelm_sdk.endpoints.parse_address`）：
 源码：`packages/duohelm/src/duohelm/isolation/`。用法：
 
 ```python
-with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, log=ctx.log) as s:
+with session_for(entry, EndpointStore(path), deps=[...], limits=Limits.from_env(), cancel=event, log=ctx.log) as s:
     out = s.compute("factor_id", data)  # 返回前已用 check_factor_output 校验
     check_no_lookahead(lambda d: s.compute("factor_id", d), data, ...)
 ```
@@ -175,8 +175,9 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 | `crashed` | 子进程意外退出 | 不能 |
 | `load` | 插件状态不是 `ready`、种类不支持，或导入失败 | 不能 |
 | `protocol` | 消息超长、格式不对、调用了不允许的方法 | 不能，平台会结束子进程 |
+| `unsupported` | 调用了允许的可选方法（如 `check_connection`），但插件没有实现 | 能 |
 
-这些错误都不应作为 `RetryableError` 自动重试：同样的输入再跑一次，结果大概率不变。
+除 `timeout`、`crashed` 外，这些错误都不应作为 `RetryableError` 自动重试：同样的输入再跑一次，结果大概率不变。`data.sync` 把 `timeout`、`crashed` 当作可能是一时的问题（数据源暂时不可达、子进程被系统结束），转成 `RetryableError`，由任务系统按 `max_attempts` 重试；其他都直接失败。
 
 ### 其他
 

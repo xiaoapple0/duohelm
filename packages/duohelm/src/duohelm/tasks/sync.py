@@ -8,6 +8,7 @@
 - 不能直接列出退市证券的数据源（``lists_delisted`` 为 False）暂不同步：退市股扫描还没有
   实现，只同步在市证券会有幸存者偏差
 - 入库前按 SDK 的契约检查格式；成交量为 0 的行（停牌占位）丢弃
+- 只同步已收盘的日子：盘中的日线不是最终值，不能进快照
 - 全部数据在一个事务里写入，成功才提交为一个快照；失败、取消时不留下半个快照。重复执行
   只写入有变化的行，同样的数据不会产生新快照
 """
@@ -17,7 +18,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Self
 
 import polars as pl
@@ -47,6 +48,9 @@ BATCH_SIZE = 50
 """每次向插件请求多少只证券的日线和复权因子。"""
 SHANGHAI = timezone(timedelta(hours=8))
 """北京时间。1991 年以后没有夏令时，用固定偏移，平台不依赖 tzdata。"""
+CLOSE = time(15, 30)
+"""北京时间这个时刻之后，当天的日线才算最终值。A 股 15:00 收盘，科创板、创业板的盘后
+固定价格交易到 15:30，成交量和成交额要到那时才定下来。"""
 _RETRYABLE_REASONS = frozenset({"timeout", "crashed"})
 _CANCEL_POLL_S = 1.0
 _MAX_EXAMPLES = 5
@@ -61,7 +65,7 @@ class SyncParams(TaskParams):
     """行情源插件的 id。"""
     start: date = EARLIEST
     end: date | None = None
-    """None 表示执行时北京时间的今天。"""
+    """None 表示执行时最近一个已收盘的日子（见 :func:`last_closed_day`）。"""
 
     @model_validator(mode="after")
     def _check_range(self) -> Self:
@@ -88,15 +92,36 @@ class SyncResult(BaseModel):
     """丢弃的成交量为 0 的行数。"""
 
 
-def shanghai_today(now: Callable[[], datetime] = lambda: datetime.now(SHANGHAI)) -> date:
-    return now().astimezone(SHANGHAI).date()
+def _beijing_now() -> datetime:
+    return datetime.now(SHANGHAI)
 
 
-def data_sync(settings: Settings, *, limits: Limits | None = None) -> TaskType:
+def last_closed_day(now: Callable[[], datetime] = _beijing_now) -> date:
+    """最近一个已收盘的日子：北京时间 15:30 之后是今天，之前是昨天。
+
+    不判断是不是交易日：非交易日插件不返回日线，多请求一天没有影响。
+    """
+    current = now().astimezone(SHANGHAI)
+    today = current.date()
+    return today if current.time() >= CLOSE else today - timedelta(days=1)
+
+
+def data_sync(
+    settings: Settings,
+    *,
+    limits: Limits | None = None,
+    now: Callable[[], datetime] = _beijing_now,
+) -> TaskType:
     def handler(ctx: TaskContext, params: SyncParams) -> SyncResult:
-        end = params.end or shanghai_today()
+        closed = last_closed_day(now)
+        end = params.end or closed
+        if end > closed:
+            raise SyncError(
+                f"end（{end}）还没有收盘：盘中的日线不是最终值，不能进快照。"
+                f"最近一个已收盘的日子是 {closed}（北京时间 {CLOSE:%H:%M} 之后算当天收盘）"
+            )
         if end < params.start:
-            raise SyncError(f"start（{params.start}）晚于今天（{end}）")
+            raise SyncError(f"start（{params.start}）晚于最近一个已收盘的日子（{end}）")
         entry, deps = find_datasource(settings, params.plugin_id)
         endpoints = EndpointStore(settings.plugin_config_path)
         assert entry.manifest is not None  # find_datasource 已检查
@@ -393,5 +418,5 @@ __all__ = [
     "SyncResult",
     "data_sync",
     "find_datasource",
-    "shanghai_today",
+    "last_closed_day",
 ]

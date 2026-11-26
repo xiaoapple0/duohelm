@@ -6,7 +6,7 @@ import json
 import textwrap
 import threading
 import time
-from datetime import date
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,7 @@ from duohelm.registry import PluginRegistry
 from duohelm.settings import Settings
 from duohelm.storage import DataStore, SnapshotConflictError
 from duohelm.tasks import RetryableError, TaskStore, TaskTypeRegistry, Worker
-from duohelm.tasks.sync import SyncParams, SyncResult, data_sync, shanghai_today
+from duohelm.tasks.sync import SyncParams, SyncResult, data_sync, last_closed_day
 from duohelm.tasks.sync import _plugin_errors as plugin_errors  # pyright: ignore[reportPrivateUsage]
 
 FAST = Limits(call_timeout_s=60, startup_timeout_s=60, poll_interval_s=0.1)
@@ -418,8 +418,52 @@ def test_params_validation() -> None:
     assert SyncParams(plugin_id="p").start == date(1990, 12, 19)
 
 
-def test_shanghai_today_uses_beijing_date() -> None:
-    from datetime import UTC, datetime  # noqa: PLC0415
+def beijing(day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(2024, 1, day, hour, minute, tzinfo=timezone(timedelta(hours=8)))
 
-    late_utc = datetime(2024, 1, 2, 17, 0, tzinfo=UTC)  # 北京时间 1 月 3 日 01:00
-    assert shanghai_today(lambda: late_utc) == date(2024, 1, 3)
+
+def test_last_closed_day_uses_beijing_time() -> None:
+    assert last_closed_day(lambda: beijing(5, 10)) == date(2024, 1, 4)  # 盘中：昨天
+    assert last_closed_day(lambda: beijing(5, 15, 29)) == date(2024, 1, 4)
+    assert last_closed_day(lambda: beijing(5, 15, 30)) == date(2024, 1, 5)  # 收盘后：今天
+    # UTC 1 月 4 日 08:00 是北京时间 1 月 4 日 16:00，已收盘
+    assert last_closed_day(lambda: datetime(2024, 1, 4, 8, 0, tzinfo=UTC)) == date(2024, 1, 4)
+    # UTC 1 月 4 日 17:00 是北京时间 1 月 5 日 01:00，最近收盘的是 1 月 4 日
+    assert last_closed_day(lambda: datetime(2024, 1, 4, 17, 0, tzinfo=UTC)) == date(2024, 1, 4)
+
+
+def run_at(settings: Settings, clock: datetime, **params: Any) -> tuple[TaskStore, int]:
+    store = TaskStore(settings.db_path)
+    types = TaskTypeRegistry([data_sync(settings, limits=FAST, now=lambda: clock)])
+    body = {"plugin_id": "fake-src", "start": START.isoformat(), **params}
+    task = store.create("data.sync", types.validate_params("data.sync", body), max_attempts=1)
+    assert Worker(store, types).run_once()
+    return store, task.id
+
+
+def test_default_end_skips_unclosed_day(settings: Settings) -> None:
+    """盘中运行：默认 end 是昨天，今天还在变的日线不进快照。"""
+    plugin = install(settings)
+    confirm(settings)
+    store, task_id = run_at(settings, beijing(5, 10))
+    result = result_of(store, task_id)
+    assert result.end == date(2024, 1, 4)
+    assert "bars" in " ".join(calls(plugin))
+    dates = DataStore(settings.data_dir).read("bars_1d").get_column("date")
+    assert dates.max() == date(2024, 1, 4)
+
+
+def test_default_end_after_close_is_today(settings: Settings) -> None:
+    install(settings)
+    confirm(settings)
+    store, task_id = run_at(settings, beijing(5, 16))
+    assert result_of(store, task_id).end == date(2024, 1, 5)
+
+
+def test_explicit_unclosed_end_fails(settings: Settings) -> None:
+    """显式传入还没收盘的 end 也不行，不下载任何数据。"""
+    plugin = install(settings)
+    confirm(settings)
+    store, task_id = run_at(settings, beijing(5, 10), end="2024-01-05")
+    assert "还没有收盘" in failed(store, task_id)
+    assert calls(plugin) == []

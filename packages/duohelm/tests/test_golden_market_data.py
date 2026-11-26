@@ -449,5 +449,7 @@ def test_every_adjusted_row_matches_step_function(golden: tuple[DataStore, SyncR
             for col, price in zip(("open", "high", "low", "close"), raw[key], strict=True):
                 want = float(Fraction(price) * scale)
                 assert row[col] == pytest.approx(want, rel=1e-12), (mode, key, col)
-            # 成交量、成交额不调整
-    assert hfq.get_column("volume").to_list() == bars.get_column("volume").to_list()
+    # 成交量、成交额不调整：hfq、qfq 都与原始 bars 逐行相等
+    for frame in (hfq, qfq):
+        for col in ("volume", "amount"):
+            assert frame.get_column(col).to_list() == bars.get_column(col).to_list(), col

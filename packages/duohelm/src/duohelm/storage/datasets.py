@@ -54,9 +54,13 @@ ST_DAILY_SCHEMA: dict[str, pl.DataType] = {
     "date": pl.Date(),
     "symbol": pl.String(),
     "name": pl.String(),
+    "status": pl.String(),
 }
-"""每日 ST 名单快照（平台的数据集）：date 那天的 ST 证券及其当时的名称。
-某个日期有任何一行才表示这一天有快照；没有快照的日子是“不知道”，不是“没有 ST”。"""
+"""每日 ST 名单快照（平台的数据集）：date 那天的 ST 证券和 ST 状态未知的证券。
+
+``status`` 为 ``st``：名称是 ST 前缀；``unknown``：名称拿不到（``name`` 为 null），ST 状态
+未知，不能当成非 ST。某个日期有任何一行才表示这一天有快照；有快照的日子里不在表里的在市
+股票是非 ST；没有快照的日子是“不知道”，不是“没有 ST”。"""
 
 INDEX_MEMBERS_DAILY_SCHEMA: dict[str, pl.DataType] = {
     "date": pl.Date(),

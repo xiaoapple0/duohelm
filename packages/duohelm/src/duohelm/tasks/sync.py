@@ -38,6 +38,7 @@ from duohelm.tasks.snapshots import (
     DEFAULT_INDEXES,
     SnapshotUnavailableError,
     fetch_index_members,
+    merge_st_rows,
     st_snapshot,
     stale_keys,
 )
@@ -66,8 +67,6 @@ CLOSE = time(15, 30)
 _RETRYABLE_REASONS = frozenset({"timeout", "crashed"})
 _CANCEL_POLL_S = 1.0
 _MAX_EXAMPLES = 5
-_SNAPSHOT_LOOKBACK = timedelta(days=15)
-"""找快照日期（最近一个交易日）时往前看多少天的日历。春节、国庆最长休市 9 天左右。"""
 
 
 class SyncError(Exception):
@@ -127,7 +126,7 @@ class SyncResult(BaseModel):
     st_snapshot_failed: str | None = None
     """取得了快照日期，但 ST 名单没写的原因（如名称全部为空）。"""
     st_unknown_names: int = 0
-    """名称为空、ST 状态未知而没有写入的在市股票数。"""
+    """名称为空、ST 状态未知（写成 status = unknown）的在市股票数。"""
     index_snapshot_failed: dict[str, str] = Field(default_factory=dict)
     """没有写成分快照的指数及原因（插件没实现、报错、格式不对、成分为空）。"""
 
@@ -153,7 +152,9 @@ def data_sync(
     now: Callable[[], datetime] = _beijing_now,
 ) -> TaskType:
     def handler(ctx: TaskContext, params: SyncParams) -> SyncResult:
-        closed = last_closed_day(now)
+        current = now().astimezone(SHANGHAI)
+        closed = last_closed_day(lambda: current)
+        today = current.date()
         end = params.end or closed
         if end > closed:
             raise SyncError(
@@ -187,6 +188,7 @@ def data_sync(
                 end,
                 addresses=addresses,
                 closed=closed,
+                today=today,
                 indexes=DEFAULT_INDEXES if params.indexes is None else tuple(params.indexes),
             )
 
@@ -226,6 +228,7 @@ def _run(
     *,
     addresses: Mapping[str, str],
     closed: date,
+    today: date,
     indexes: Sequence[str],
 ) -> SyncResult:
     plugin_id = session.entry.id
@@ -265,7 +268,7 @@ def _run(
         "index_members_daily": 0,
     }
     snap = _prepare_snapshots(
-        ctx, session, securities=securities, end=end, closed=closed, indexes=indexes
+        ctx, session, securities=securities, end=end, closed=closed, today=today, indexes=indexes
     )
     if not caps.exact_delist_date:
         ctx.log(f"插件 {plugin_id} 的退市日是近似值，记进 delist_date_quality")
@@ -346,26 +349,37 @@ def _prepare_snapshots(
     securities: pl.DataFrame,
     end: date,
     closed: date,
+    today: date,
     indexes: Sequence[str],
 ) -> _Snapshots:
     """决定要不要写快照，并取好要写的内容（还没写）。
 
-    快照日期是最近一个已收盘的交易日；同步到的 end 早于最近已收盘的日子时不写：
-    名单是现在的名单，不能当成过去的名单。
+    名单是运行那一刻的名单，只有交易日 15:30 之后运行才能代表这个交易日，所以只在这时写，
+    快照日期是最近已收盘的日子（closed），它必须是今天（today，北京时间）、且是交易日。
+    同步到的 end 早于 closed（回补历史）时也不写。其余情况都跳过，不能用现在的名单改写
+    前一个交易日已经写好的快照。
     """
+    reason: str | None = None
     if end < closed:
         reason = (
             f"同步区间的 end（{end}）早于最近一个已收盘的日子（{closed}），"
             "现在的名单不能当成过去的名单"
         )
+    elif closed != today:
+        reason = (
+            f"现在是北京时间 {today} 的收盘前，最近已收盘的日子是 {closed}：名单是现在的名单，"
+            "不能代表前一个收盘日，也不能改写它已有的快照；快照只在交易日 "
+            f"{CLOSE:%H:%M} 之后运行时写"
+        )
+    if reason is not None:
         ctx.log(f"不写 ST 名单和指数成分快照：{reason}")
         return _Snapshots(skipped=reason)
-    calendar = fetch_calendar(session, closed - _SNAPSHOT_LOOKBACK, closed)
-    if not calendar.height:
-        reason = f"{closed - _SNAPSHOT_LOOKBACK} 至 {closed} 的交易日历为空，找不到快照日期"
-        ctx.log(f"不写 ST 名单和指数成分快照：{reason}", "warning")
+    calendar = fetch_calendar(session, closed, closed)
+    if closed not in calendar.get_column("date").to_list():
+        reason = f"{closed} 不是交易日，快照只在交易日 {CLOSE:%H:%M} 之后运行时写"
+        ctx.log(f"不写 ST 名单和指数成分快照：{reason}")
         return _Snapshots(skipped=reason)
-    day: date = calendar.get_column("date").max()  # pyright: ignore[reportAssignmentType]
+    day = closed
     snap = _Snapshots(day=day)
     try:
         snap.st, snap.st_unknown = st_snapshot(securities, day)
@@ -373,9 +387,11 @@ def _prepare_snapshots(
         snap.st_failed = str(exc)
         ctx.log(f"不写 {day} 的 ST 名单：{exc}", "warning")
     else:
-        ctx.log(f"{day} 的 ST 名单：{snap.st.height} 只")
+        ctx.log(f"{day} 的 ST 名单（含状态未知的）：{snap.st.height} 行")
         if snap.st_unknown:
-            ctx.log(f"{snap.st_unknown} 只在市股票名称为空，ST 状态未知，没有写入", "warning")
+            ctx.log(
+                f"{snap.st_unknown} 只在市股票名称为空，ST 状态未知（status = unknown）", "warning"
+            )
     for index in indexes:
         try:
             snap.members[index] = fetch_index_members(session, index, day)
@@ -400,7 +416,10 @@ def _write_day(
     existing = data.read(dataset, start=day, end=day)
     if index is not None:
         existing = existing.filter(pl.col("index") == index)
-    stale = stale_keys(existing, rows, list(DATASETS[dataset].keys))
+    if dataset == "st_daily":
+        rows, stale = merge_st_rows(existing, rows)
+    else:
+        stale = stale_keys(existing, rows, list(DATASETS[dataset].keys))
     if stale.height:
         tx.delete(dataset, stale)
     return tx.write(dataset, rows)

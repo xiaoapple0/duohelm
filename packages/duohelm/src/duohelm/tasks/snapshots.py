@@ -46,26 +46,47 @@ def is_st_name(name: str) -> bool:
 
 
 def st_snapshot(securities: pl.DataFrame, day: date) -> tuple[pl.DataFrame, int]:
-    """day 那天的 ST 名单：(date、symbol、name 三列, 名称为空的在市股票数)。
+    """day 那天的 ST 名单：(date、symbol、name、status 四列, 状态未知的在市股票数)。
 
     只看在市股票：kind 为 stock，上市日不晚于 day（或未知），退市日为空或晚于 day。
-    名称为空的 ST 状态未知，不写入。
+    名称为空的 ST 状态未知：写成 status = "unknown"、name 为 null，不能当成非 ST。
     """
     listed = securities.filter(
         (pl.col("kind") == "stock")
         & (pl.col("list_date").is_null() | (pl.col("list_date") <= day))
         & (pl.col("delist_date").is_null() | (pl.col("delist_date") > day))
     )
-    named = listed.filter(pl.col("name").is_not_null() & (pl.col("name").str.strip_chars() != ""))
-    unknown = listed.height - named.height
+    has_name = pl.col("name").is_not_null() & (pl.col("name").str.strip_chars() != "")
+    named = listed.filter(has_name)
+    unknown = listed.filter(~has_name)
     if listed.height and not named.height:
         raise SnapshotUnavailableError(f"{listed.height} 只在市股票的名称全部为空，无法判定 ST")
-    st = (
-        named.filter(pl.col("name").map_elements(is_st_name, return_dtype=pl.Boolean()))
-        .select(pl.lit(day).alias("date"), "symbol", "name")
-        .sort("symbol")
+    st = named.filter(pl.col("name").map_elements(is_st_name, return_dtype=pl.Boolean())).select(
+        pl.lit(day).alias("date"), "symbol", "name", pl.lit("st").alias("status")
     )
-    return st, unknown
+    unknown_rows = unknown.select(
+        pl.lit(day).alias("date"),
+        "symbol",
+        pl.lit(None, dtype=pl.String()).alias("name"),
+        pl.lit("unknown").alias("status"),
+    )
+    return pl.concat([st, unknown_rows]).sort("symbol"), unknown.height
+
+
+def merge_st_rows(existing: pl.DataFrame, new: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """同一天重复同步：(要写入的行, 要作废的主键)。
+
+    以这次为准，但这次状态未知（unknown）的股票，已有的行保持不变：之前知道的比现在不知道的
+    好，也不能因为这次没拿到名称就把它从名单里删掉。
+    """
+    write = new.filter(
+        ~(
+            (pl.col("status") == "unknown")
+            & pl.col("symbol").is_in(existing.get_column("symbol").to_list())
+        )
+    )
+    gone = existing.filter(~pl.col("symbol").is_in(new.get_column("symbol").to_list()))
+    return write, gone.select("date", "symbol")
 
 
 def fetch_index_members(session: PluginSession, index: str, day: date) -> pl.DataFrame:
@@ -118,6 +139,7 @@ __all__ = [
     "SnapshotUnavailableError",
     "fetch_index_members",
     "is_st_name",
+    "merge_st_rows",
     "st_snapshot",
     "stale_keys",
 ]

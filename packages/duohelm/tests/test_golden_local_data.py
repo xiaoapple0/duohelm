@@ -2,7 +2,7 @@
 
 带 ``local_data`` 标记，默认不运行，CI 不运行；运行：``uv run pytest -m local_data``。
 读取 ``.local-data/`` 下 xtdata 插件录制的真实数据（目录可用环境变量 DUOHELM_LOCAL_DATA 指定）。
-录制数据不存在时跳过：这些测试只在本机运行，不适用“CI 上依赖缺失必须失败”。
+录制目录不存在时整体跳过；录制文件存在却缺少某次调用或字段时失败。
 
 只断言公开可查的事实。录制数据不进仓库，也不把它的内容复制进测试。
 """
@@ -43,10 +43,9 @@ def shanghai_day(ms: int) -> date:
 
 
 def call(calls: dict[str, Any], *key: str | None) -> Any:
-    try:
-        return calls[json.dumps(list(key))]
-    except KeyError:
-        pytest.skip(f"录制数据里没有这次调用：{key}")
+    # 录制文件存在却缺少这次调用：失败，不跳过
+    assert json.dumps(list(key)) in calls, f"录制数据里没有这次调用：{key}"
+    return calls[json.dumps(list(key))]
 
 
 # 公开可查：上市日

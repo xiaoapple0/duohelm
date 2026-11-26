@@ -364,7 +364,10 @@ def test_bars_partitioned_by_year(golden: tuple[DataStore, SyncResult]) -> None:
     data, result = golden
     assert result.snapshot_id is not None
     files = data.manifest(result.snapshot_id).datasets["bars_1d"]
-    assert {e.partition: e.rows for e in files} == {"2023": BARS_2023, "2024": BARS_2024}
+    rows_by_partition: dict[str, int] = {}
+    for entry in files:  # 一个分区可能有多个文件，按分区求和
+        rows_by_partition[entry.partition] = rows_by_partition.get(entry.partition, 0) + entry.rows
+    assert rows_by_partition == {"2023": BARS_2023, "2024": BARS_2024}
     # 跨年读取：d2、d3 两天，各 7 只有行（新股、没有行的 600600.SH 除外；退市股 d2、d3 都有）
     across = data.read("bars_1d", start=D2, end=D3)
     assert across.height == 14

@@ -48,6 +48,8 @@ def _client(settings: Settings, base_url: str) -> TestClient:
         "http://localhost:8765",
         "http://127.0.0.1:5173",  # Web 开发服务器把 /api 代理过来，Host 是它的端口
         "http://localhost:5173",
+        "http://[::1]:8765",
+        "http://[::1]:5173",
     ],
 )
 def test_local_hosts_accepted(app_settings: Settings, base_url: str) -> None:
@@ -63,6 +65,9 @@ def test_local_hosts_accepted(app_settings: Settings, base_url: str) -> None:
         "http://192.168.1.20:8765",
         "http://localhost.evil.com:8765",
         "http://testserver",
+        "http://[::1]",  # 缺端口
+        "http://[::1]:9999",
+        "http://[::2]:8765",
     ],
 )
 def test_other_hosts_rejected(app_settings: Settings, base_url: str) -> None:
@@ -75,12 +80,13 @@ def test_other_hosts_rejected(app_settings: Settings, base_url: str) -> None:
 @pytest.mark.parametrize(
     "origin",
     [
-        None,  # 写请求不带 Origin
         "http://evil.example.com",
         "http://evil.example.com:8765",
         "http://127.0.0.1:9999",
         "https://127.0.0.1:8765",
         "null",
+        "",
+        "http://[::1]:9999",
     ],
 )
 def test_writes_need_platform_origin(
@@ -103,6 +109,8 @@ def test_writes_need_platform_origin(
         "http://localhost:8765",
         "http://127.0.0.1:5173",
         "http://localhost:5173",
+        "http://[::1]:8765",
+        "http://[::1]:5173",
     ],
 )
 def test_writes_from_platform_origin_pass_the_guard(app_settings: Settings, origin: str) -> None:
@@ -111,6 +119,29 @@ def test_writes_from_platform_origin_pass_the_guard(app_settings: Settings, orig
     body = {"confirm": True, "digest": "x"}
     r = client.put("/api/plugins/x/network", json=body, headers={"Origin": origin})
     assert r.status_code == 404
+
+
+@pytest.mark.parametrize(("method", "path", "body"), WRITES)
+def test_writes_without_origin_pass_the_guard(
+    app_settings: Settings, method: str, path: str, body: object
+) -> None:
+    """不带 Origin 的写请求（脚本、curl）放行：返回业务结果，不是 403。"""
+    client = _client(app_settings, "http://127.0.0.1:8765")
+    kwargs: dict[str, object] = {}
+    if body is not None:
+        kwargs["json"] = body
+    r = client.request(method.upper(), path, **kwargs)  # pyright: ignore[reportArgumentType]
+    assert r.status_code != 403, r.text
+    assert r.status_code in {404, 422}
+
+
+def test_writes_without_origin_still_need_local_host(app_settings: Settings) -> None:
+    """不带 Origin 也要过 Host 校验：局域网访问（--host 0.0.0.0）仍然返回 400。"""
+    client = _client(app_settings, "http://192.168.1.20:8765")
+    assert (
+        client.put("/api/plugins/x/network", json={"confirm": True, "digest": "x"}).status_code
+        == 400
+    )
 
 
 def test_reads_do_not_need_origin(app_settings: Settings) -> None:

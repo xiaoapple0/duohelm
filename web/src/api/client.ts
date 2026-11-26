@@ -30,6 +30,16 @@ export interface EndpointConfirm {
   confirm_internet?: boolean;
 }
 
+/** none：没有声明；approved：已确认；needs_approval：没确认过或列表变了，确认前插件不能联网。 */
+export type NetworkState = "none" | "approved" | "needs_approval";
+
+export interface PluginNetwork {
+  hosts: string[];
+  state: NetworkState;
+  approved_hosts: string[] | null;
+  approved_at: string | null;
+}
+
 export interface Plugin {
   id: string;
   status: PluginStatus;
@@ -38,6 +48,7 @@ export interface Plugin {
   kind: PluginKind | null;
   path: string;
   problems: string[];
+  network: PluginNetwork | null;
   endpoints: PluginEndpoint[];
 }
 
@@ -173,6 +184,12 @@ function query(params: Record<string, string | number | undefined>): string {
 export const api = {
   health: () => getJson<Health>("/api/health"),
   plugins: () => getJson<Plugin[]>("/api/plugins"),
+  approveNetwork: (pluginId: string) =>
+    putJson<PluginNetwork>(`/api/plugins/${encodeURIComponent(pluginId)}/network`, {
+      confirm: true,
+    }),
+  revokeNetwork: (pluginId: string) =>
+    deleteJson<PluginNetwork>(`/api/plugins/${encodeURIComponent(pluginId)}/network`),
   confirmEndpoint: (pluginId: string, endpointId: string, body: EndpointConfirm) =>
     putJson<PluginEndpoint>(
       `/api/plugins/${encodeURIComponent(pluginId)}/endpoints/${encodeURIComponent(endpointId)}`,

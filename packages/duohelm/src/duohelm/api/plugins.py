@@ -1,4 +1,5 @@
-"""插件的 HTTP 接口：/api/plugins，以及用户配置的连接地址 /api/plugins/{id}/endpoints。"""
+"""插件的 HTTP 接口：/api/plugins，网络地址的确认 /api/plugins/{id}/network，
+用户配置的连接地址 /api/plugins/{id}/endpoints。"""
 
 from __future__ import annotations
 
@@ -14,6 +15,8 @@ from duohelm.endpoints import (
     EndpointState,
     EndpointStore,
     EndpointView,
+    NetworkState,
+    NetworkView,
     UnknownEndpointError,
 )
 from duohelm.registry import PluginEntry, PluginRegistry, PluginStatus
@@ -47,6 +50,24 @@ class EndpointOut(BaseModel):
         )
 
 
+class NetworkOut(BaseModel):
+    hosts: list[str]
+    """清单当前声明的 network 列表。"""
+    state: NetworkState
+    """none：没有声明；approved：已确认；needs_approval：没确认过或列表变了，确认前不能联网。"""
+    approved_hosts: list[str] | None
+    approved_at: datetime | None
+
+    @classmethod
+    def from_view(cls, view: NetworkView) -> NetworkOut:
+        return cls(
+            hosts=list(view.hosts),
+            state=view.state,
+            approved_hosts=None if view.approved_hosts is None else list(view.approved_hosts),
+            approved_at=view.approved_at,
+        )
+
+
 class PluginOut(BaseModel):
     id: str
     status: PluginStatus
@@ -55,6 +76,7 @@ class PluginOut(BaseModel):
     kind: PluginKind | None
     path: str
     problems: list[str]
+    network: NetworkOut | None
     endpoints: list[EndpointOut]
 
     @classmethod
@@ -69,8 +91,14 @@ class PluginOut(BaseModel):
             kind=info.kind if info else None,
             path=str(entry.path),
             problems=list(entry.problems),
+            network=NetworkOut.from_view(store.network_view(m)) if m else None,
             endpoints=[EndpointOut.from_view(v) for v in store.views(m)] if m else [],
         )
+
+
+class NetworkApprove(BaseModel):
+    confirm: Literal[True]
+    """必须为 true：用户已经看过插件要连接的整个地址列表并确认。"""
 
 
 class EndpointConfirm(BaseModel):
@@ -101,6 +129,18 @@ def plugin_router(registry: PluginRegistry, store: EndpointStore) -> APIRouter:
     @router.get("", response_model=list[PluginOut])
     def list_plugins() -> list[PluginOut]:
         return [PluginOut.from_entry(e, store) for e in registry.scan()]
+
+    @router.put("/{plugin_id}/network", response_model=NetworkOut)
+    def approve_network(plugin_id: str, body: NetworkApprove) -> NetworkOut:
+        try:
+            view = store.approve_network(manifest_of(plugin_id), confirmed=body.confirm)
+        except EndpointConfigError as exc:
+            raise config_error(exc) from None
+        return NetworkOut.from_view(view)
+
+    @router.delete("/{plugin_id}/network", response_model=NetworkOut)
+    def revoke_network(plugin_id: str) -> NetworkOut:
+        return NetworkOut.from_view(store.revoke_network(manifest_of(plugin_id)))
 
     @router.get("/{plugin_id}/endpoints", response_model=list[EndpointOut])
     def list_endpoints(plugin_id: str) -> list[EndpointOut]:

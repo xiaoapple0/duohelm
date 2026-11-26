@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import socket
+import subprocess
+import sys
 import textwrap
 import threading
 from collections.abc import Iterator
@@ -18,7 +21,9 @@ from duohelm.endpoints import (
     EndpointStore,
     UnknownEndpointError,
     checked_addresses,
+    checked_network,
     endpoints_digest,
+    network_digest,
 )
 from duohelm.isolation import Limits, PluginRunError, PluginSession, session_for
 from duohelm.isolation.netguard import Allowlist
@@ -95,7 +100,7 @@ def test_digest_ignores_rest_of_manifest() -> None:
     base = endpoints_digest(manifest())
     assert endpoints_digest(manifest(version="2.0.0")) == base
     assert endpoints_digest(manifest(name="改名了")) == base
-    assert endpoints_digest(manifest(network='"example.com:80"')) == base
+    assert endpoints_digest(manifest(network='"example.com:80"')) == base  # network 另算
 
 
 @pytest.mark.parametrize(
@@ -190,13 +195,13 @@ def test_clear_and_audit(store: EndpointStore) -> None:
     view = store.clear(m, "svc")
     assert view.state == "default"
     store.clear(m, "svc")  # 没有配置时清除：不记审计
-    audit = [(a.action, a.old_address, a.new_address) for a in store.audit("ep-test")]
+    audit = [(a.target, a.action, a.old_value, a.new_value) for a in store.audit("ep-test")]
     assert audit == [
-        ("confirm", None, "192.168.31.5:58610"),
-        ("confirm", "192.168.31.5:58610", "192.168.31.6:58610"),
-        ("clear", "192.168.31.6:58610", None),
+        ("endpoint:svc", "confirm", None, "192.168.31.5:58610"),
+        ("endpoint:svc", "confirm", "192.168.31.5:58610", "192.168.31.6:58610"),
+        ("endpoint:svc", "clear", "192.168.31.6:58610", None),
     ]
-    assert all(a.endpoints_digest == endpoints_digest(m) for a in store.audit("ep-test"))
+    assert all(a.digest == endpoints_digest(m) for a in store.audit("ep-test"))
 
 
 def test_store_survives_reopen(tmp_path: Path) -> None:
@@ -223,6 +228,72 @@ def test_checked_addresses_rejects_undeclared() -> None:
         checked_addresses(manifest(), {"svc": "127.0.0.1:1", "other": "127.0.0.1:2"})
 
 
+# ---- network：整个列表由用户确认 ----
+
+NETWORK = '"8.8.8.8:53", "api.example.com"'
+
+
+def test_network_needs_approval_before_use(store: EndpointStore) -> None:
+    m = manifest(network=NETWORK)
+    view = store.network_view(m)
+    assert (view.state, view.hosts, view.approved_hosts) == (
+        "needs_approval",
+        ("8.8.8.8:53", "api.example.com"),
+        None,
+    )
+    assert store.network_for(m) == []  # 确认前不能联网
+    with pytest.raises(ConfirmationRequiredError):
+        store.approve_network(m, confirmed=False)
+    assert store.network_for(m) == []
+    view = store.approve_network(m, confirmed=True)
+    assert view.state == "approved"
+    assert store.network_for(m) == ["8.8.8.8:53", "api.example.com"]
+
+
+def test_network_list_change_requires_reapproval(store: EndpointStore) -> None:
+    store.approve_network(manifest(network=NETWORK), confirmed=True)
+    # 插件升版本、改 endpoints：network 不需要重新确认
+    assert store.network_for(manifest(network=NETWORK, version="2.0.0", description="x")) != []
+    # 顺序不同不算变化
+    reordered = manifest(network='"api.example.com", "8.8.8.8:53"')
+    assert store.network_view(reordered).state == "approved"
+    # 多了一个地址：需要重新确认，之前不能联网
+    grown = manifest(network=NETWORK + ', "data.example.com:443"')
+    view = store.network_view(grown)
+    assert view.state == "needs_approval"
+    assert view.approved_hosts == ("8.8.8.8:53", "api.example.com")
+    assert store.network_for(grown) == []
+    store.approve_network(grown, confirmed=True)
+    assert len(store.network_for(grown)) == 3
+
+
+def test_network_revoke_and_audit(store: EndpointStore) -> None:
+    m = manifest(network=NETWORK)
+    store.approve_network(m, confirmed=True)
+    view = store.revoke_network(m)
+    assert view.state == "needs_approval"
+    assert store.network_for(m) == []
+    store.revoke_network(m)  # 没有确认过时撤销：不记审计
+    audit = [(a.target, a.action) for a in store.audit("ep-test")]
+    assert audit == [("network", "approve_network"), ("network", "revoke_network")]
+    assert all(a.digest == network_digest(m) for a in store.audit("ep-test"))
+
+
+def test_no_network_declared(store: EndpointStore) -> None:
+    m = manifest()
+    assert store.network_view(m).state == "none"
+    assert store.network_for(m) == []
+    with pytest.raises(EndpointConfigError, match="没有声明 network"):
+        store.approve_network(m, confirmed=True)
+
+
+def test_checked_network_must_be_declared() -> None:
+    m = manifest(network=NETWORK)
+    assert checked_network(m, ["8.8.8.8:53"]) == ["8.8.8.8:53"]
+    with pytest.raises(EndpointConfigError, match="不在清单的 network 里"):
+        checked_network(m, ["1.1.1.1:53"])
+
+
 # ---- netguard 白名单 ----
 
 
@@ -242,13 +313,121 @@ def test_allowlist_hostname_and_resolved_ips() -> None:
     assert allow.allows("TDX.example.com.", 7709, lookup=True)
     assert allow.allows("tdx.example.com", None, lookup=True)
     assert not allow.allows("tdx.example.com", 80, lookup=True)
-    assert not allow.allows("203.0.113.7", 7709)  # 还没解析过
-    allow.remember("tdx.example.com", ["203.0.113.7"])
-    assert allow.allows("203.0.113.7", 7709)
-    assert not allow.allows("203.0.113.7", 80)
-    assert not allow.allows("203.0.113.7", 7709, lookup=True)  # 解析主机名只认白名单里写明的
-    allow.remember("evil.example.com", ["198.51.100.1"])  # 不在白名单里的主机名：不记
-    assert not allow.allows("198.51.100.1", 7709)
+    assert not allow.allows("8.8.4.4", 7709)  # 还没解析过
+    allow.remember("tdx.example.com", ["8.8.4.4"])
+    assert allow.allows("8.8.4.4", 7709)
+    assert not allow.allows("8.8.4.4", 80)
+    assert not allow.allows("8.8.4.4", 7709, lookup=True)  # 解析主机名只认白名单里写明的
+    allow.remember("evil.example.com", ["1.1.1.1"])  # 不在白名单里的主机名：不记
+    assert not allow.allows("1.1.1.1", 7709)
+    allow.remember("tdx.example.com", ["10.0.0.1", "127.0.0.1"])  # 私有、本机地址：不记
+    assert not allow.allows("10.0.0.1", 7709)
+    assert not allow.allows("127.0.0.1", 7709)
+
+
+DNS_SCRIPT = r"""
+import json
+import socket
+
+# 在安装 netguard 之前换掉解析函数：测试不访问真实 DNS
+FAKE = {
+    "data.example.com": ["8.8.8.8"],
+    "evil.example.com": ["127.0.0.1"],
+    "mixed.example.com": ["8.8.8.8", "192.168.1.5"],
+    "127.1": ["127.0.0.1"],  # 不规范的 IP 写法，系统解析器会把它当成 127.0.0.1
+}
+
+
+def fake_getaddrinfo(host, port, *args, **kwargs):
+    if host not in FAKE:
+        raise socket.gaierror("unknown")
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in FAKE[host]]
+
+
+def fake_gethostbyname(host):
+    return FAKE[host][0]
+
+
+socket.getaddrinfo = fake_getaddrinfo
+socket.gethostbyname = fake_gethostbyname
+
+# 记录实际交给 C 层的地址，不真的连接
+sent = []
+socket.socket.connect = lambda self, address: sent.append(("connect", address))
+socket.socket.sendto = lambda self, data, address: sent.append(("sendto", address))
+
+from duohelm.isolation import netguard
+
+netguard.install(
+    ["data.example.com:80", "evil.example.com:80", "mixed.example.com:80", "127.1:80"]
+)
+results = {}
+
+
+def attempt(name, fn):
+    try:
+        fn()
+        results[name] = "ok"
+    except netguard.NetworkBlockedError as exc:
+        results[name] = "blocked: " + str(exc)
+
+
+attempt("data", lambda: socket.getaddrinfo("data.example.com", 80))
+attempt("data_ip_80", lambda: netguard._check_address(("8.8.8.8", 80)))
+attempt("data_ip_81", lambda: netguard._check_address(("8.8.8.8", 81)))
+attempt("evil", lambda: socket.getaddrinfo("evil.example.com", 80))
+attempt("evil_byname", lambda: socket.gethostbyname("evil.example.com"))
+attempt("evil_ip", lambda: netguard._check_address(("127.0.0.1", 80)))
+attempt("mixed", lambda: socket.getaddrinfo("mixed.example.com", 80))
+attempt("other", lambda: socket.getaddrinfo("other.example.com", 80))
+attempt("other_byname", lambda: socket.gethostbyname("other.example.com"))
+attempt("numeric", lambda: socket.getaddrinfo("127.1", 80))
+
+# 直接用主机名调 connect / sendto：先走受检的解析，再用解析出的 IP
+tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+attempt("connect_data", lambda: tcp.connect(("data.example.com", 80)))
+attempt("sendto_data", lambda: udp.sendto(b"x", ("data.example.com", 80)))
+attempt("connect_evil", lambda: tcp.connect(("evil.example.com", 80)))
+attempt("sendto_evil", lambda: udp.sendto(b"x", ("evil.example.com", 80)))
+attempt("connect_numeric", lambda: tcp.connect(("127.1", 80)))
+attempt("connect_other", lambda: tcp.connect(("other.example.com", 80)))
+results["sent"] = [[kind, list(addr)] for kind, addr in sent]
+print(json.dumps(results, ensure_ascii=False))
+"""
+
+
+def test_hostname_must_resolve_to_public_ip(tmp_path: Path) -> None:
+    """白名单里的主机名：解析到公网 IP 才放行；解析到本机或私有网段（哪怕只有一个）就拦截。
+
+    netguard 安装后不可撤销，所以放在单独的进程里跑；解析函数换成假的，不访问真实 DNS。
+    """
+    script = tmp_path / "dns_check.py"
+    script.write_text(DNS_SCRIPT, encoding="utf-8")
+    done = subprocess.run(
+        [sys.executable, "-X", "utf8", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    results = json.loads(done.stdout)
+    assert results["data"] == "ok"
+    assert results["data_ip_80"] == "ok"  # 解析出的公网 IP 按主机名那一项的端口放行
+    assert results["data_ip_81"].startswith("blocked")
+    for name in ("evil", "evil_byname", "mixed"):
+        assert "解析到本机或私有网段" in results[name], results[name]
+    assert results["evil_ip"].startswith("blocked")  # 私有地址没有被记下来
+    for name in ("other", "other_byname", "connect_other"):
+        assert "没有网络权限" in results[name], results[name]
+    # 直接用主机名连接：实际交给 C 层的是解析出的公网 IP，内网的根本没有发出去
+    assert results["connect_data"] == "ok"
+    assert results["sendto_data"] == "ok"
+    for name in ("numeric", "connect_evil", "sendto_evil", "connect_numeric"):
+        assert "解析到本机或私有网段" in results[name], results[name]
+    assert results["sent"] == [["connect", ["8.8.8.8", 80]], ["sendto", ["8.8.8.8", 80]]]
 
 
 # ---- 子进程：白名单和 endpoint 地址 ----
@@ -268,21 +447,20 @@ class Plugin:
             a = endpoint("svc", default="127.0.0.1:1")
             inside = in_platform()
             return pl.DataFrame({"host": [a.host], "port": [a.port], "in_platform": [inside]})
+        if name == "allows":  # 子进程里实际生效的白名单
+            from duohelm.isolation import netguard
+
+            host, _, port = arg.rpartition(":")
+            return pl.DataFrame({"ok": [netguard._allow.allows(host, int(port))]})
         if name == "connect":
             s = socket.socket()
             s.settimeout(5)
             s.connect(("127.0.0.1", int(arg)))
             s.close()
             return pl.DataFrame({"ok": [True]})
-        if name == "by_name":  # 主机名：getaddrinfo + 解析出的 IP
-            s = socket.create_connection(("localhost", int(arg)), timeout=5)
-            s.close()
-            ip = socket.gethostbyname("localhost")
-            return pl.DataFrame({"ok": [True], "ip": [ip]})
         if name == "lookup":  # 只解析，不连接
-            how, _, port = arg.partition("@")
-            if how == "getaddrinfo":
-                socket.getaddrinfo("localhost", int(port))
+            if arg == "getaddrinfo":
+                socket.getaddrinfo("localhost", 80)
             else:
                 socket.gethostbyname("localhost")
             return pl.DataFrame({"ok": [True]})
@@ -349,6 +527,12 @@ def make_entry(root: Path, **kw: str) -> PluginEntry:
     return entry
 
 
+def loopback(tmp_path: Path, port: int) -> tuple[PluginEntry, dict[str, str]]:
+    """本机的连接只能走 loopback 范围的 endpoint（network 不允许本机地址）。"""
+    entry = make_entry(tmp_path, scope="loopback")
+    return entry, {"svc": f"127.0.0.1:{port}"}
+
+
 @pytest.fixture
 def listener() -> Iterator[tuple[int, list[str]]]:
     server = socket.socket()
@@ -407,21 +591,43 @@ def test_plugin_receives_default_without_config(tmp_path: Path) -> None:
     assert df.row(0) == ("127.0.0.1", 58610, True)
 
 
-def test_network_allowlist_from_manifest(tmp_path: Path, listener: tuple[int, list[str]]) -> None:
-    port, seen = listener
-    entry = make_entry(tmp_path, network=f'"127.0.0.1:{port}"')
+def test_network_reaches_child_only_after_approval(tmp_path: Path) -> None:
+    """完整路径：清单的 network 在用户确认前不放行，确认后经 session_for 进入子进程的白名单。"""
+    entry = make_entry(tmp_path / "plugins", network=NETWORK)
+    assert entry.manifest is not None
+    store = EndpointStore(tmp_path / "plugin-config.db")
+    with session_for(entry, store, limits=FAST) as s:
+        assert s.call("compute", "allows:8.8.8.8:53", DATA)["ok"].item() is False
+    store.approve_network(entry.manifest, confirmed=True)
+    with session_for(entry, store, limits=FAST) as s:
+        assert s.call("compute", "allows:8.8.8.8:53", DATA)["ok"].item() is True
+        assert s.call("compute", "allows:8.8.8.8:80", DATA)["ok"].item() is False
+
+
+def test_session_without_network_param_allows_none(tmp_path: Path) -> None:
+    """直接构造 PluginSession 且不传 network：清单的 network 一个都不放行。"""
+    entry = make_entry(tmp_path, network=NETWORK)
     with PluginSession(entry, limits=FAST) as s:
-        assert s.call("compute", f"connect:{port}", DATA)["ok"].item() is True
-        with pytest.raises(PluginRunError, match="没有网络权限"):
-            s.call("compute", f"connect:{_free_port()}", DATA)
-    assert len(seen) == 1
+        assert s.call("compute", "allows:8.8.8.8:53", DATA)["ok"].item() is False
+
+
+def test_session_refuses_network_not_in_manifest(tmp_path: Path) -> None:
+    entry = make_entry(tmp_path, network=NETWORK)
+    session = PluginSession(entry, limits=FAST, network=["1.1.1.1:53"])
+    with pytest.raises(PluginRunError, match="不在清单的 network 里") as info:
+        session.start()
+    assert info.value.reason == "load"
+    assert session.workdir is None
+    session.close()
 
 
 def test_endpoint_address_is_allowed(tmp_path: Path, listener: tuple[int, list[str]]) -> None:
     port, seen = listener
-    entry = make_entry(tmp_path, scope="loopback")
-    with PluginSession(entry, limits=FAST, endpoints={"svc": f"127.0.0.1:{port}"}) as s:
+    entry, endpoints = loopback(tmp_path, port)
+    with PluginSession(entry, limits=FAST, endpoints=endpoints) as s:
         assert s.call("compute", f"connect:{port}", DATA)["ok"].item() is True
+        with pytest.raises(PluginRunError, match="没有网络权限"):
+            s.call("compute", f"connect:{_free_port()}", DATA)
     assert len(seen) == 1
 
 
@@ -437,39 +643,18 @@ def test_endpoint_default_port_only(tmp_path: Path, listener: tuple[int, list[st
     assert seen == []
 
 
-def test_hostname_in_allowlist(tmp_path: Path, listener: tuple[int, list[str]]) -> None:
-    """白名单写主机名：解析放行，解析出的 IP 按同样的端口放行。"""
-    port, seen = listener
-    entry = make_entry(tmp_path, network=f'"localhost:{port}"')
-    with PluginSession(entry, limits=FAST) as s:
-        df = s.call("compute", f"by_name:{port}", DATA)
-        assert df["ok"].item() is True
-        # 解析出的 127.0.0.1 只放行白名单里的端口
-        with pytest.raises(PluginRunError, match="没有网络权限"):
-            s.call("compute", f"connect:{_free_port()}", DATA)
-    assert len(seen) == 1
-
-
-def test_hostname_not_in_allowlist(tmp_path: Path, listener: tuple[int, list[str]]) -> None:
-    port, seen = listener
-    entry = make_entry(tmp_path, network=f'"127.0.0.1:{port}"')
-    with PluginSession(entry, limits=FAST) as s, pytest.raises(PluginRunError, match="localhost"):
-        s.call("compute", f"by_name:{port}", DATA)
-    assert seen == []
-
-
 @pytest.mark.parametrize("how", ["getaddrinfo", "gethostbyname"])
 def test_lookup_needs_hostname_in_allowlist(tmp_path: Path, how: str) -> None:
     """只解析不连接，也要求主机名在白名单里。"""
-    denied = make_entry(tmp_path / "d", network='"127.0.0.1:80"')
+    entry = make_entry(tmp_path, network=NETWORK)
+    store = EndpointStore(tmp_path / "plugin-config.db")
+    assert entry.manifest is not None
+    store.approve_network(entry.manifest, confirmed=True)
     with (
-        PluginSession(denied, limits=FAST) as s,
+        session_for(entry, store, limits=FAST) as s,
         pytest.raises(PluginRunError, match="没有网络权限"),
     ):
-        s.call("compute", f"lookup:{how}@80", DATA)
-    allowed = make_entry(tmp_path / "a", network='"localhost:80"')
-    with PluginSession(allowed, limits=FAST) as s:
-        assert s.call("compute", f"lookup:{how}@80", DATA)["ok"].item() is True
+        s.call("compute", f"lookup:{how}", DATA)
 
 
 @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Windows 的 Python 没有 AF_UNIX")
@@ -479,9 +664,9 @@ def test_unix_socket_refused(tmp_path: Path) -> None:
     server.bind(str(path))
     server.listen()
     try:
-        entry = make_entry(tmp_path / "p", network='"127.0.0.1"')
+        entry, endpoints = loopback(tmp_path / "p", _free_port())
         with (
-            PluginSession(entry, limits=FAST) as s,
+            PluginSession(entry, limits=FAST, endpoints=endpoints) as s,
             pytest.raises(PluginRunError, match="不能连接"),
         ):
             s.call("compute", f"unix:{path}", DATA)
@@ -491,15 +676,19 @@ def test_unix_socket_refused(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(not hasattr(socket.socket, "sendmsg"), reason="Windows 的 Python 没有 sendmsg")
 def test_sendmsg_refused_even_if_allowed(tmp_path: Path) -> None:
-    entry = make_entry(tmp_path, network='"127.0.0.1"')
-    with PluginSession(entry, limits=FAST) as s, pytest.raises(PluginRunError, match="sendmsg"):
-        s.call("compute", f"sendmsg:{_free_port()}", DATA)
+    port = _free_port()
+    entry, endpoints = loopback(tmp_path, port)
+    with (
+        PluginSession(entry, limits=FAST, endpoints=endpoints) as s,
+        pytest.raises(PluginRunError, match="sendmsg"),
+    ):
+        s.call("compute", f"sendmsg:{port}", DATA)
 
 
 def test_reverse_lookup_always_refused(tmp_path: Path) -> None:
-    entry = make_entry(tmp_path, network='"127.0.0.1"')
+    entry, endpoints = loopback(tmp_path, _free_port())
     with (
-        PluginSession(entry, limits=FAST) as s,
+        PluginSession(entry, limits=FAST, endpoints=endpoints) as s,
         pytest.raises(PluginRunError, match="gethostbyaddr"),
     ):
         s.call("compute", "reverse", DATA)
@@ -511,13 +700,13 @@ def test_udp_sendto(tmp_path: Path) -> None:
     receiver.settimeout(5)
     port = int(receiver.getsockname()[1])
     try:
-        allowed = make_entry(tmp_path / "a", network=f'"127.0.0.1:{port}"')
-        with PluginSession(allowed, limits=FAST) as s:
+        allowed, endpoints = loopback(tmp_path / "a", port)
+        with PluginSession(allowed, limits=FAST, endpoints=endpoints) as s:
             assert s.call("compute", f"udp:{port}", DATA)["ok"].item() is True
         assert receiver.recv(16) == b"x"
-        blocked = make_entry(tmp_path / "b", network=f'"127.0.0.1:{port + 1}"')
+        blocked, other = loopback(tmp_path / "b", port + 1)
         with (
-            PluginSession(blocked, limits=FAST) as s,
+            PluginSession(blocked, limits=FAST, endpoints=other) as s,
             pytest.raises(PluginRunError, match="没有网络权限"),
         ):
             s.call("compute", f"udp:{port}", DATA)
@@ -535,8 +724,8 @@ def test_asyncio_connection_is_guarded(tmp_path: Path, listener: tuple[int, list
     ):
         s.call("compute", f"asyncio:{port}", DATA)
     assert seen == []
-    allowed = make_entry(tmp_path / "a", network=f'"127.0.0.1:{port}"')
-    with PluginSession(allowed, limits=FAST) as s:
+    allowed, endpoints = loopback(tmp_path / "a", port)
+    with PluginSession(allowed, limits=FAST, endpoints=endpoints) as s:
         assert s.call("compute", f"asyncio:{port}", DATA)["ok"].item() is True
     assert len(seen) == 1
 

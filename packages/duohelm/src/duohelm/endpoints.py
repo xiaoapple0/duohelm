@@ -1,4 +1,12 @@
-"""用户配置的连接地址（插件清单里的 ``[[permissions.endpoints]]``）：保存、确认、取用。
+"""插件的网络权限：清单的 ``permissions.network`` 和用户配置的连接地址
+（``[[permissions.endpoints]]``），都由用户在平台里确认。
+
+network（SDK 0.3.1 起只允许公网地址）：
+
+- 整个列表由用户确认一次（:meth:`EndpointStore.approve_network`）；确认前插件不能联网
+- 列表的哈希（:func:`network_digest`）变了需要重新确认，重新确认之前插件不能联网
+
+endpoints：
 
 规则见 docs/subsystems/plugins.md 的“用户可配置的连接地址”：
 
@@ -8,7 +16,7 @@
 - 是否需要重新确认只看清单里 endpoints 那一节的哈希（:func:`endpoints_digest`）：插件升版本、
   改描述等清单其他部分的改动不需要重新确认；这一节变了，已保存的地址在重新确认之前不使用，
   插件只能用清单的 default
-- 每次确认、清除都记审计日志（只在本机数据库里）。普通日志不写具体地址
+- 每次确认、清除、撤销都记审计日志（只在本机数据库里）。普通日志不写具体地址
 
 地址保存在 ``DUOHELM_HOME/plugin-config.db``，不进任何仓库。
 """
@@ -20,7 +28,7 @@ import json
 import logging
 import sqlite3
 import time
-from collections.abc import Generator, Mapping
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -43,21 +51,31 @@ CREATE TABLE plugin_endpoints (
   confirmed_at     INTEGER NOT NULL,
   PRIMARY KEY (plugin_id, endpoint_id)
 );
-CREATE TABLE endpoint_audit (
+CREATE TABLE plugin_network (
+  plugin_id        TEXT    PRIMARY KEY,
+  hosts            TEXT    NOT NULL,
+  network_digest   TEXT    NOT NULL,
+  approved_at      INTEGER NOT NULL
+);
+CREATE TABLE permission_audit (
   id               INTEGER PRIMARY KEY,
   plugin_id        TEXT    NOT NULL,
-  endpoint_id      TEXT    NOT NULL,
+  target           TEXT    NOT NULL,
   action           TEXT    NOT NULL,
-  old_address      TEXT,
-  new_address      TEXT,
-  endpoints_digest TEXT    NOT NULL,
+  old_value        TEXT,
+  new_value        TEXT,
+  digest           TEXT    NOT NULL,
   at               INTEGER NOT NULL
 );
-CREATE INDEX endpoint_audit_plugin ON endpoint_audit(plugin_id, id);
+CREATE INDEX permission_audit_plugin ON permission_audit(plugin_id, id);
 """
 
 EndpointState = Literal["default", "confirmed", "needs_confirmation"]
-AuditAction = Literal["confirm", "clear"]
+NetworkState = Literal["none", "approved", "needs_approval"]
+"""none：清单没有声明 network；approved：用户确认过当前列表；needs_approval：从没确认过，
+或列表变了，确认之前插件不能联网。"""
+AuditAction = Literal["confirm", "clear", "approve_network", "revoke_network"]
+NETWORK_TARGET = "network"
 
 
 class EndpointConfigError(Exception):
@@ -78,6 +96,23 @@ def endpoints_digest(manifest: Manifest) -> str:
     section = [e.model_dump(mode="json") for e in manifest.permissions.endpoints]
     text = json.dumps(section, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def network_digest(manifest: Manifest) -> str:
+    """清单 ``permissions.network`` 列表的哈希（排序后的规范化 JSON 的 sha256）。"""
+    hosts = sorted(manifest.permissions.network)
+    text = json.dumps(hosts, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def checked_network(manifest: Manifest, network: Sequence[str]) -> list[str]:
+    """传给子进程的 network 白名单必须是清单声明的子集（启动子进程前检查）。"""
+    extra = sorted(set(network) - set(manifest.permissions.network))
+    if extra:
+        raise EndpointConfigError(
+            f"插件 {manifest.id} 要放行的网络地址有 {len(extra)} 个不在清单的 network 里"
+        )
+    return list(network)
 
 
 def checked_addresses(manifest: Manifest, addresses: Mapping[str, str]) -> dict[str, Address]:
@@ -118,14 +153,29 @@ class EndpointView:
 
 
 @dataclass(frozen=True)
+class NetworkView:
+    """清单 network 列表的确认状态，给 API 和页面用。"""
+
+    plugin_id: str
+    hosts: tuple[str, ...]
+    """清单当前声明的列表。"""
+    state: NetworkState
+    approved_hosts: tuple[str, ...] | None
+    """用户上次确认的列表（需要重新确认时也返回，方便对比）。"""
+    approved_at: datetime | None
+
+
+@dataclass(frozen=True)
 class AuditEntry:
     id: int
     plugin_id: str
-    endpoint_id: str
+    target: str
+    """``endpoint:<id>`` 或 ``network``。"""
     action: AuditAction
-    old_address: str | None
-    new_address: str | None
-    endpoints_digest: str
+    old_value: str | None
+    new_value: str | None
+    digest: str
+    """当时 endpoints 那一节（或 network 列表）的哈希。"""
     at: datetime
 
 
@@ -216,20 +266,41 @@ class EndpointStore:
         """
         return {v.endpoint.id: v.effective for v in self.views(manifest)}
 
+    def network_view(self, manifest: Manifest) -> NetworkView:
+        hosts = tuple(manifest.permissions.network)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM plugin_network WHERE plugin_id = ?", (manifest.id,)
+            ).fetchone()
+        approved = None if row is None else tuple(json.loads(row["hosts"]))
+        approved_at = None if row is None else _to_datetime(row["approved_at"])
+        if not hosts:
+            state: NetworkState = "none"
+        elif row is not None and row["network_digest"] == network_digest(manifest):
+            state = "approved"
+        else:
+            state = "needs_approval"
+        return NetworkView(manifest.id, hosts, state, approved, approved_at)
+
+    def network_for(self, manifest: Manifest) -> list[str]:
+        """要放行的 network 地址：用户确认过当前列表时是整个列表，否则为空（不能联网）。"""
+        view = self.network_view(manifest)
+        return list(view.hosts) if view.state == "approved" else []
+
     def audit(self, plugin_id: str) -> list[AuditEntry]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM endpoint_audit WHERE plugin_id = ? ORDER BY id", (plugin_id,)
+                "SELECT * FROM permission_audit WHERE plugin_id = ? ORDER BY id", (plugin_id,)
             ).fetchall()
         return [
             AuditEntry(
                 id=r["id"],
                 plugin_id=r["plugin_id"],
-                endpoint_id=r["endpoint_id"],
+                target=r["target"],
                 action=r["action"],
-                old_address=r["old_address"],
-                new_address=r["new_address"],
-                endpoints_digest=r["endpoints_digest"],
+                old_value=r["old_value"],
+                new_value=r["new_value"],
+                digest=r["digest"],
                 at=_to_datetime(r["at"]),
             )
             for r in rows
@@ -277,7 +348,16 @@ class EndpointStore:
                 """,
                 (manifest.id, endpoint_id, str(parsed), digest, now),
             )
-            self._record(conn, manifest.id, endpoint_id, "confirm", old, str(parsed), digest, now)
+            self._record(
+                conn,
+                manifest.id,
+                f"endpoint:{endpoint_id}",
+                "confirm",
+                None if old is None else old["address"],
+                str(parsed),
+                digest,
+                now,
+            )
         logger.info("插件 %s 的 endpoint %s 已确认新地址", manifest.id, endpoint_id)
         return self._view(manifest, endpoint_id)
 
@@ -296,10 +376,81 @@ class EndpointStore:
                     "DELETE FROM plugin_endpoints WHERE plugin_id = ? AND endpoint_id = ?",
                     (manifest.id, endpoint_id),
                 )
-                self._record(conn, manifest.id, endpoint_id, "clear", old, None, digest, now)
+                self._record(
+                    conn,
+                    manifest.id,
+                    f"endpoint:{endpoint_id}",
+                    "clear",
+                    old["address"],
+                    None,
+                    digest,
+                    now,
+                )
         if old is not None:
             logger.info("插件 %s 的 endpoint %s 已恢复为默认地址", manifest.id, endpoint_id)
         return self._view(manifest, endpoint_id)
+
+    def approve_network(self, manifest: Manifest, *, confirmed: bool) -> NetworkView:
+        """确认清单 network 的整个列表。列表变了以后再调用一次，即“重新确认”。"""
+        hosts = list(manifest.permissions.network)
+        if not hosts:
+            raise EndpointConfigError(f"插件 {manifest.id} 的清单没有声明 network")
+        if not confirmed:
+            raise ConfirmationRequiredError("放行插件的网络地址需要确认")
+        digest = network_digest(manifest)
+        now = _now_ms()
+        new_value = json.dumps(hosts, ensure_ascii=False)
+        with self._transaction() as conn:
+            old = conn.execute(
+                "SELECT hosts FROM plugin_network WHERE plugin_id = ?", (manifest.id,)
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO plugin_network (plugin_id, hosts, network_digest, approved_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (plugin_id) DO UPDATE SET
+                  hosts = excluded.hosts,
+                  network_digest = excluded.network_digest,
+                  approved_at = excluded.approved_at
+                """,
+                (manifest.id, new_value, digest, now),
+            )
+            self._record(
+                conn,
+                manifest.id,
+                NETWORK_TARGET,
+                "approve_network",
+                None if old is None else old["hosts"],
+                new_value,
+                digest,
+                now,
+            )
+        logger.info("插件 %s 的 network 列表（%d 个地址）已确认", manifest.id, len(hosts))
+        return self.network_view(manifest)
+
+    def revoke_network(self, manifest: Manifest) -> NetworkView:
+        """撤销 network 的确认：插件不能再联网，直到用户重新确认。"""
+        now = _now_ms()
+        with self._transaction() as conn:
+            old = conn.execute(
+                "SELECT hosts, network_digest FROM plugin_network WHERE plugin_id = ?",
+                (manifest.id,),
+            ).fetchone()
+            if old is not None:
+                conn.execute("DELETE FROM plugin_network WHERE plugin_id = ?", (manifest.id,))
+                self._record(
+                    conn,
+                    manifest.id,
+                    NETWORK_TARGET,
+                    "revoke_network",
+                    old["hosts"],
+                    None,
+                    old["network_digest"],
+                    now,
+                )
+        if old is not None:
+            logger.info("插件 %s 的 network 确认已撤销", manifest.id)
+        return self.network_view(manifest)
 
     def _view(self, manifest: Manifest, endpoint_id: str) -> EndpointView:
         return next(v for v in self.views(manifest) if v.endpoint.id == endpoint_id)
@@ -308,26 +459,18 @@ class EndpointStore:
     def _record(  # noqa: PLR0917  审计记录的各列
         conn: sqlite3.Connection,
         plugin_id: str,
-        endpoint_id: str,
+        target: str,
         action: AuditAction,
-        old: sqlite3.Row | None,
-        new_address: str | None,
+        old_value: str | None,
+        new_value: str | None,
         digest: str,
         at: int,
     ) -> None:
         conn.execute(
-            "INSERT INTO endpoint_audit "
-            "(plugin_id, endpoint_id, action, old_address, new_address, endpoints_digest, at) "
+            "INSERT INTO permission_audit "
+            "(plugin_id, target, action, old_value, new_value, digest, at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                plugin_id,
-                endpoint_id,
-                action,
-                None if old is None else old["address"],
-                new_address,
-                digest,
-                at,
-            ),
+            (plugin_id, target, action, old_value, new_value, digest, at),
         )
 
 

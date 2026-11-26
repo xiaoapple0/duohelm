@@ -27,7 +27,12 @@ from typing import Any, BinaryIO, Literal, Self, cast
 import polars as pl
 import psutil
 
-from duohelm.endpoints import EndpointConfigError, EndpointStore, checked_addresses
+from duohelm.endpoints import (
+    EndpointConfigError,
+    EndpointStore,
+    checked_addresses,
+    checked_network,
+)
 from duohelm.isolation.protocol import (
     FrameStore,
     ProtocolError,
@@ -144,6 +149,7 @@ def session_for(
         cancel=cancel,
         log=log,
         endpoints=store.addresses_for(entry.manifest),
+        network=store.network_for(entry.manifest),
     )
 
 
@@ -162,10 +168,15 @@ class PluginSession:
         cancel: threading.Event | None = None,
         log: Callable[[str], None] | None = None,
         endpoints: Mapping[str, str] | None = None,
+        network: Sequence[str] = (),
     ) -> None:
         """``endpoints``：要传给插件的连接地址（endpoint id -> ``主机:端口``），通常来自
         :meth:`duohelm.endpoints.EndpointStore.addresses_for`；没给的用清单的 default。
-        启动子进程之前按 scope 再校验一次。"""
+        启动子进程之前按 scope 再校验一次。
+
+        ``network``：放行的清单 network 地址，来自
+        :meth:`duohelm.endpoints.EndpointStore.network_for`（用户确认过才有）。默认为空，
+        即不放行清单的 network；必须是清单 network 的子集。"""
         if entry.status is not PluginStatus.READY or entry.manifest is None:
             raise PluginRunError("load", f"插件 {entry.id} 的状态是 {entry.status}，不能运行")
         info = entry.manifest.plugin
@@ -182,6 +193,7 @@ class PluginSession:
         self._entrypoint = info.entrypoint
         self._manifest = entry.manifest
         self._endpoint_texts: dict[str, str] = dict(endpoints or {})
+        self._network = list(network)
 
         self.workdir: Path | None = None
         self._proc: subprocess.Popen[bytes] | None = None
@@ -230,9 +242,10 @@ class PluginSession:
         # 第二次校验：启动子进程、传地址之前，按清单里的 scope 再校验一次。
         try:
             addresses = checked_addresses(self._manifest, self._endpoint_texts)
+            approved = checked_network(self._manifest, self._network)
         except EndpointConfigError as exc:
             raise PluginRunError("load", str(exc)) from None
-        network = [*self._manifest.permissions.network, *(str(a) for a in addresses.values())]
+        network = [*approved, *(str(a) for a in addresses.values())]
         workdir = Path(tempfile.mkdtemp(prefix="duohelm-plugin-"))
         self.workdir = workdir
         self._inputs = FrameStore(workdir, "in")

@@ -6,9 +6,11 @@ import { useState } from "react";
 import {
   api,
   type EndpointState,
+  type NetworkState,
   type Plugin,
   type PluginEndpoint,
   type PluginKind,
+  type PluginNetwork,
   type PluginStatus,
 } from "../api/client";
 import { useRequest } from "../api/useRequest";
@@ -34,6 +36,12 @@ const ENDPOINT_STATE: Record<EndpointState, { color: string; label: string }> = 
   needs_confirmation: { color: "orange", label: "需要重新确认" },
 };
 
+const NETWORK_STATE: Record<NetworkState, { color: string; label: string }> = {
+  none: { color: "default", label: "不联网" },
+  approved: { color: "green", label: "已确认" },
+  needs_approval: { color: "orange", label: "待确认，不能联网" },
+};
+
 const columns: TableColumnsType<Plugin> = [
   { title: "ID", dataIndex: "id", key: "id" },
   { title: "名称", dataIndex: "name", key: "name", render: (v: string | null) => v ?? "-" },
@@ -54,6 +62,23 @@ const columns: TableColumnsType<Plugin> = [
     dataIndex: "status",
     key: "status",
     render: (v: PluginStatus) => <Tag color={STATUS[v].color}>{STATUS[v].label}</Tag>,
+  },
+  {
+    title: "联网",
+    dataIndex: "network",
+    key: "network",
+    render: (network: PluginNetwork | null) => {
+      if (!network || network.state === "none") {
+        return "-";
+      }
+      const s = NETWORK_STATE[network.state];
+      return (
+        <Space size={4} style={{ whiteSpace: "nowrap" }}>
+          <Tag color={s.color}>{s.label}</Tag>
+          <span>{network.hosts.length} 个地址</span>
+        </Space>
+      );
+    },
   },
   {
     title: "连接地址",
@@ -108,6 +133,97 @@ export default function PluginsPage() {
     } catch (err: unknown) {
       void message.error(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  async function approveNetwork(plugin: Plugin) {
+    try {
+      await api.approveNetwork(plugin.id);
+      void message.success("已确认，插件可以连接这些地址");
+      reload();
+    } catch (err: unknown) {
+      void message.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function revokeNetwork(plugin: Plugin) {
+    try {
+      await api.revokeNetwork(plugin.id);
+      void message.success("已撤销，插件不能再联网");
+      reload();
+    } catch (err: unknown) {
+      void message.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function networkSection(plugin: Plugin) {
+    const network = plugin.network;
+    if (!network || network.state === "none") {
+      return null;
+    }
+    const added = network.approved_hosts
+      ? network.hosts.filter((h) => !network.approved_hosts?.includes(h))
+      : [];
+    const removed = network.approved_hosts
+      ? network.approved_hosts.filter((h) => !network.hosts.includes(h))
+      : [];
+    return (
+      <div style={{ marginBottom: 16 }}>
+        <Space style={{ marginBottom: 8 }}>
+          <Typography.Text strong>联网地址（{network.hosts.length} 个）</Typography.Text>
+          <Tag color={NETWORK_STATE[network.state].color}>
+            {NETWORK_STATE[network.state].label}
+          </Tag>
+        </Space>
+        {network.state === "needs_approval" && network.approved_hosts && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 8 }}
+            message="插件的联网地址列表变了，重新确认之前插件不能联网"
+            description={
+              <>
+                {added.length > 0 && <div>新增：{added.join("、")}</div>}
+                {removed.length > 0 && <div>去掉：{removed.join("、")}</div>}
+              </>
+            }
+          />
+        )}
+        <ul style={{ margin: "0 0 8px", paddingLeft: 20 }}>
+          {network.hosts.map((h) => (
+            <li key={h}>
+              <Typography.Text code style={{ whiteSpace: "nowrap" }}>
+                {h}
+              </Typography.Text>
+            </li>
+          ))}
+        </ul>
+        <Space>
+          {network.state === "needs_approval" && (
+            <Popconfirm
+              title={`允许插件 ${plugin.name ?? plugin.id} 连接这 ${network.hosts.length} 个地址？`}
+              description="只允许公网地址；连接时解析到本机或局域网的地址会被拦截"
+              okText="确认放行"
+              cancelText="取消"
+              onConfirm={() => void approveNetwork(plugin)}
+            >
+              <Button size="small" type="primary">
+                确认放行
+              </Button>
+            </Popconfirm>
+          )}
+          {network.state === "approved" && (
+            <Popconfirm
+              title="撤销后插件不能联网，确定？"
+              okText="撤销"
+              cancelText="取消"
+              onConfirm={() => void revokeNetwork(plugin)}
+            >
+              <Button size="small">撤销确认</Button>
+            </Popconfirm>
+          )}
+        </Space>
+      </div>
+    );
   }
 
   function endpointTable(plugin: Plugin) {
@@ -201,8 +317,14 @@ export default function PluginsPage() {
         loading={loading}
         pagination={false}
         expandable={{
-          expandedRowRender: endpointTable,
-          rowExpandable: (p) => p.endpoints.length > 0,
+          expandedRowRender: (p) => (
+            <>
+              {networkSection(p)}
+              {p.endpoints.length > 0 && endpointTable(p)}
+            </>
+          ),
+          rowExpandable: (p) =>
+            p.endpoints.length > 0 || (p.network !== null && p.network.state !== "none"),
         }}
         locale={{ emptyText: "插件目录里还没有插件" }}
       />

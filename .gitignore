@@ -23,6 +23,10 @@ web/dist/
 .env.*
 *.pem
 *.key
+# 录制的行情数据（测试回放文件等）只放在本机，见 docs/subsystems/data.md
+.local-data/
+# xtdata 插件的 MiniQMT 本机连接配置（含真实地址）
+miniqmt.toml
 
 # 本机的启动配置（含本机绝对路径）
 .claude/launch.json

@@ -701,4 +701,4 @@ def test_capabilities_roundtrip_and_unknown_freq_skipped(tmp_path: Path) -> None
     decoded = decode(newer, store)
     assert decoded.freqs == (Freq.DAY,)
     assert decoded.lists_delisted is False
-    assert decoded.exact_delist_date is True  # 0.4.0 的插件不发这个字段：按 SDK 口径
+    assert decoded.exact_delist_date is True  # 缺少这个字段（父子进程 SDK 不一致时）：按默认值

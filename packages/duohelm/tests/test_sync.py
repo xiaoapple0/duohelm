@@ -532,6 +532,21 @@ def test_lookup_returning_unrequested_code_fails(settings: Settings, small_scan:
     assert DataStore(settings.data_dir).head() is None
 
 
+def test_scanned_delist_dates_marked_approximate(settings: Settings, small_scan: None) -> None:
+    """eltdx 的真实场景：扫描找到的退市股，退市日记为近似值。"""
+    install(settings, lists_delisted=False, exact_delist_date=False)
+    confirm(settings)
+    run(settings)
+    quality = dict(DataStore(settings.data_dir).read("delist_date_quality").rows())
+    assert quality == {
+        "000001.SH": None,
+        "000001.SZ": None,
+        "600000.SH": None,
+        "600001.SH": False,
+        "600005.SH": False,
+    }
+
+
 def test_scan_ranges_cover_a_shares_and_bj() -> None:
     symbols = delisted.scan_symbols()
     assert len(symbols) == len(set(symbols)) == 6000 + 2000 + 4999 + 3000 + 1000

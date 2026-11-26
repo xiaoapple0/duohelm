@@ -139,6 +139,8 @@ data/
 
 `delist_date_quality` 是平台自己的数据集，不是插件的输出格式。每只证券一行，和 `securities` 在同一个事务里写入：`exact` 为 True 表示退市日精确，为 False 表示近似值（数据源的 `exact_delist_date` 为 False），为 null 表示仍在市。快照里没有某只证券的行（例如 SDK 0.4.1 之前同步的快照），表示“不知道”，不能当成精确。
 
+读取规则：拿 `securities` 左连接这个数据集时，“没有行”和“仍在市”都得到 null，要靠 `delist_date` 区分。**`delist_date` 不为空且 `exact` 为 True，才算精确**；`delist_date` 不为空而 `exact` 为 null，是“不知道”。True 只表示数据源没有声明是近似值：还没升级到 SDK 0.4.1 的插件同步出的行也是 True。eltdx 升级前同步过的，升级后再同步一次就会改为 False（扫描路径每次都会重新查询全部退市股）
+
 ### 只新增文件
 
 - 每次写入生成新的 Parquet 文件，已有的文件从不修改。修改和删除都通过追加新文件完成

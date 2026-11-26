@@ -218,11 +218,13 @@ def test_unknown_board_is_unknown() -> None:
 
 def test_main_board_registration_new_listing_first_five_days_unlimited() -> None:
     listing = date(2023, 4, 10)
-    for idx in range(1, 6):
-        res = pl("603000.SH", date(2023, 4, 10), "10.00", listing=listing, idx=idx)
+    days = [date(2023, 4, 10), date(2023, 4, 11), date(2023, 4, 12), date(2023, 4, 13)]
+    days.append(date(2023, 4, 14))
+    for idx, day in enumerate(days, start=1):
+        res = pl("603000.SH", day, "10.00", listing=listing, idx=idx)
         assert res.status is UNLIMITED
         assert res.upper is None and res.lower is None
-    assert limited(pl("603000.SH", date(2023, 4, 18), "30.00", listing=listing, idx=6)) == (
+    assert limited(pl("603000.SH", date(2023, 4, 17), "30.00", listing=listing, idx=6)) == (
         "33.00",
         "27.00",
     )
@@ -319,8 +321,34 @@ def test_listing_info_insufficient() -> None:
 def test_bad_listing_inputs_raise() -> None:
     with pytest.raises(ValueError, match="从 1 开始"):
         pl("600000.SH", date(2024, 3, 5), "10.00", idx=0)
-    with pytest.raises(ValueError, match="晚于交易日"):
-        pl("600000.SH", date(2024, 3, 5), "10.00", listing=date(2024, 3, 6), idx=1)
+
+
+@pytest.mark.parametrize(
+    ("day", "listing", "idx"),
+    [
+        (date(2023, 4, 11), date(2023, 4, 10), 1),  # 第 1 天但交易日不是上市日
+        (date(2023, 4, 10), date(2023, 4, 10), 2),  # 上市当天却是第 2 天
+        (date(2023, 4, 10), date(2023, 4, 11), 1),  # 交易日早于上市日
+        (date(2023, 4, 10), date(2023, 4, 11), None),  # 交易日早于上市日，序号未知
+        (date(2023, 4, 12), date(2023, 4, 10), 4),  # 两个自然日放不下 4 个交易日
+        (date(2023, 4, 12), date(2023, 4, 10), 9),  # 同上，序号大于 5 也检查
+    ],
+)
+def test_inconsistent_listing_inputs_are_unknown(day: date, listing: date, idx: int | None) -> None:
+    # 603000.SH 的上市日期 2023-04-10 之后的前 5 个交易日不设涨跌幅：矛盾的输入不能当成“不设涨跌幅”
+    res = pl("603000.SH", day, "10.00", listing=listing, idx=idx)
+    assert res.status is UNKNOWN
+    assert res.upper is None and res.lower is None
+    assert "矛盾" in res.reason or "晚于" in res.reason
+
+
+def test_st_unknown_reason_before_st_existed() -> None:
+    # 1998-04-22 之前没有 ST：原因是“没有适用于 ST 的规则”，不是“比例不同”
+    res = pl("600000.SH", date(1998, 4, 21), "10.00", st=None)
+    assert res.status is UNKNOWN
+    assert "没有适用于 ST" in res.reason
+    assert "比例不同" not in res.reason
+    assert "比例不同" in pl("600000.SH", date(2024, 3, 5), "10.00", st=None).reason
 
 
 def test_listing_day_index() -> None:

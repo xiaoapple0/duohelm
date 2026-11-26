@@ -199,19 +199,36 @@ def _check_decimal(name: str, value: object) -> Decimal:
     return value
 
 
-def _find_ratio(board: Board, day: date, is_st: bool | None) -> RatioRule | None:
-    """ST 未知时，ST 和非 ST 的比例必须相同才返回，否则视为拿不准。"""
+def _find_ratio(board: Board, day: date, is_st: bool | None) -> RatioRule | str:
+    """ST 未知时，ST 和非 ST 的比例必须相同才返回规则，否则返回拿不准的原因。"""
     candidates = (True, False) if is_st is None else (is_st,)
     found: list[RatioRule] = []
     for st in candidates:
         rule = next((r for r in RATIO_RULES if r.board is board and r.covers(day, st)), None)
         if rule is None:
-            return None
+            label = "ST" if st else "非 ST"
+            note = "ST 状态未知，" if is_st is None else ""
+            return f"{note}{board.value} {day} 没有适用于 {label} 的涨跌幅规则"
         found.append(rule)
     first = found[0]
     if any((r.up, r.down) != (first.up, first.down) for r in found):
-        return None
+        return f"{board.value} {day} 的 ST 状态未知，且 ST 与非 ST 的比例不同"
     return first
+
+
+def _inconsistent(day: date, listing: date | None, index: int | None) -> str | None:
+    """上市日期、上市第几个交易日和交易日互相矛盾时返回原因。"""
+    if listing is None:
+        return None
+    if listing > day:
+        return f"上市日期 {listing} 晚于交易日 {day}"
+    if index is None:
+        return None
+    if (index == 1) != (listing == day):
+        return f"上市第 {index} 个交易日与上市日期 {listing}、交易日 {day} 矛盾"
+    if (day - listing).days < index - 1:
+        return f"上市日期 {listing} 到交易日 {day} 放不下 {index} 个交易日"
+    return None
 
 
 def _listing_rule(board: Board, listing: date) -> NewListingRule | None:
@@ -247,8 +264,9 @@ def price_limit(
     prev = _check_decimal("prev_close", prev_close)
     if listing_day_index is not None and listing_day_index < 1:
         raise ValueError(f"listing_day_index 从 1 开始，收到 {listing_day_index}")
-    if listing_date is not None and listing_date > trade_date:
-        raise ValueError(f"上市日期 {listing_date} 晚于交易日 {trade_date}")
+    conflict = _inconsistent(trade_date, listing_date, listing_day_index)
+    if conflict is not None:
+        return _unknown(f"输入自相矛盾：{conflict}")
 
     board = classify_board(code)
     if board is Board.UNKNOWN:
@@ -259,10 +277,8 @@ def price_limit(
         return initial
 
     rule = _find_ratio(board, trade_date, is_st)
-    if rule is None:
-        if is_st is None:
-            return _unknown(f"{board.value} {trade_date} 的 ST 状态未知，且 ST 与非 ST 的比例不同")
-        return _unknown(f"{board.value} {trade_date} 没有适用的涨跌幅规则（ST={is_st}）")
+    if isinstance(rule, str):
+        return _unknown(rule)
     return _limits(prev, rule.up, rule.down, rule.source)
 
 

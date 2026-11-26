@@ -52,12 +52,13 @@ tools: Read, Grep, Glob
 - 测试有没有访问真实的外部服务（应回放录制数据）
 - 测试样本是不是“编得刚好能过”，有没有漏掉停牌、缺失、复权跳变这些情况
 
-### 3. 需要维护者决定的范围（AGENTS.md 的风险分级）
+### 3. 需要维护者决定的范围，和高风险改动（AGENTS.md 的风险分级和阶段 3）
+
+#### 不能自动合并
 
 改动触及以下任一项时，结论至少是“需维护者决定”，并提醒 PR 打上 `needs-maintainer` 标签：
 
-- 契约：插件接口、清单格式、数据标准格式、`duohelm_sdk` 的公开 API。按文件对照：`packages/duohelm-sdk/src/duohelm_sdk/` 下的 `__init__.py`（`__all__`）、`protocols.py`、`manifest.py`、`schema.py`、`endpoints.py`、`context.py`，以及 `__all__` 导出的其他模块；SDK 版本号（`version.py`、`packages/duohelm-sdk/pyproject.toml`）
-- 高风险逻辑的文件：`duohelm_sdk/checks.py`（未来函数检查等契约检查）、`duohelm_sdk/adjust.py`（复权），以及回测成交规则、point-in-time 相关的代码
+- 契约的不兼容改动：删除或改名公开 API、改变已有字段或方法的含义、清单格式或数据标准格式的不兼容变化，以及 SDK 次版本号的升级（`version.py`、`packages/duohelm-sdk/pyproject.toml`）。按 `docs/subsystems/plugins.md` 的“契约变更”判断兼容与否；拿不准的按不兼容处理
 - `.github/` 下的任何文件
 - 依赖：`pyproject.toml` 的依赖、`uv.lock` 里新增或移除的包、`web/package.json`
 - 凭据处理
@@ -65,7 +66,21 @@ tools: Read, Grep, Glob
 - `PRINCIPLES.md`、`ROADMAP.md`、`AGENTS.md` 的内容
 - 审查和规则的依据：`LESSONS.md`、`docs/code-standards.md` 的任何改动，以及本文件 `.claude/agents/reviewer.md` 和生成审查材料的 `scripts/review-bundle.sh` 的任何改动，一律“需维护者决定”，不论改动是放松、收紧还是只改措辞
 - `CLAUDE.md`，以及 `.claude/` 下的一切（`agents/`，包括本文件，`commands/`、`skills/`、`settings*.json`、hooks 配置等）：它们决定 agent 读哪些规则、怎么行事。审查规则不能被它审查的改动悄悄放松
-- 未来函数检查、回测成交规则、复权和 point-in-time 逻辑（高风险，PR 说明里要写明对结果的影响）
+
+#### 高风险，可以自动合并，但要额外检查
+
+改动触及以下任一项、又不属于上面的“不能自动合并”时，不因此给出“需维护者决定”，而是在输出的“高风险项”一节逐条列出：
+
+- 兼容的契约改动：插件接口、清单格式、数据标准格式、`duohelm_sdk` 的公开 API。按文件对照：`packages/duohelm-sdk/src/duohelm_sdk/` 下的 `__init__.py`（`__all__`）、`protocols.py`、`manifest.py`、`schema.py`、`endpoints.py`、`context.py`，以及 `__all__` 导出的其他模块；SDK 补丁版本号的升级
+- 高风险逻辑的文件：`duohelm_sdk/checks.py`（未来函数检查等契约检查）、`duohelm_sdk/adjust.py`（复权），以及回测成交规则、point-in-time 相关的代码
+- 未来函数检查、回测成交规则、复权和 point-in-time 逻辑
+
+对每一条高风险项，检查：
+
+- 审查材料里的提交正文写明了对结果的影响（AGENTS.md 风险分级：高风险改动在提交里写明）；没有写的，列进“需修改”
+- 每条被保护的行为都有测试，作者列出了对应的破坏验证；缺的列进“需修改”。你不能运行测试，破坏验证的结果写进“没能检查的项”
+- 黄金数据集还没有实现时，在“高风险项”里注明“黄金数据集对照无法完成，按 AGENTS.md 阶段 3 交给维护者合并”
+- 提醒合并时打 `auto-merged-high-risk` 标签
 
 ### 4. CI 与分支保护
 
@@ -110,7 +125,10 @@ tools: Read, Grep, Glob
 1. <文件:行号> <问题> —— <为什么是问题，破坏了哪条规则>
 
 需维护者决定：
-1. <事项> —— <原因（触及契约 / .github / 依赖 / ...）>，建议打 needs-maintainer
+1. <事项> —— <原因（触及不兼容的契约改动 / .github / 依赖 / ...）>，建议打 needs-maintainer
+
+高风险项：
+1. <文件> <触及哪一类> —— <结果影响是否写明、破坏验证是否列出、黄金数据集对照>
 
 已检查、没有问题的项：
 - <检查项>：<一句话说明看了什么>

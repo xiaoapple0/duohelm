@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from duohelm import __version__
+from duohelm.api.data import data_router
 from duohelm.api.plugins import plugin_router
 from duohelm.api.security import install_origin_guard
 from duohelm.api.tasks import task_router
@@ -74,6 +75,7 @@ def create_app(settings: Settings | None = None, *, run_workers: bool = False) -
     install_origin_guard(app, settings)
     app.include_router(task_router(store, task_types))
     app.include_router(plugin_router(registry, endpoints))
+    app.include_router(data_router(settings.data_dir))
 
     def health() -> HealthResponse:
         return HealthResponse(status="ok", version=__version__, sdk_version=SDK_VERSION)

@@ -177,7 +177,7 @@ with session_for(
 | `crashed` | 子进程意外退出 | 不能 |
 | `load` | 插件状态不是 `ready`、种类不支持，或导入失败 | 不能 |
 | `protocol` | 消息超长、格式不对、调用了不允许的方法 | 不能，平台会结束子进程 |
-| `unsupported` | 调用了允许的可选方法（如 `check_connection`），但插件根本没有这个属性。属性存在但不可调用、或方法内部抛出 `NotImplementedError`，都算 `plugin_error` | 能 |
+| `unsupported` | 调用了允许的可选方法（如 `check_connection`），但插件根本没有这个属性。属性存在但不可调用、或方法内部抛出 `NotImplementedError`，都算 `plugin_error`。可选方法要定义在类上：子进程用 `inspect.getattr_static` 判断，`__getattr__` 动态提供的方法认不出来 | 能 |
 
 除 `timeout`、`crashed` 外，这些错误都不应作为 `RetryableError` 自动重试：同样的输入再跑一次，结果大概率不变。`data.sync` 把 `timeout`、`crashed` 当作可能是一时的问题（数据源暂时不可达、子进程被系统结束），转成 `RetryableError`，由任务系统按 `max_attempts` 重试；其他都直接失败。
 

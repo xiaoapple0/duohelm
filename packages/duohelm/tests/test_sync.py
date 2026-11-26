@@ -269,7 +269,7 @@ def test_bars_outside_range_fail(settings: Settings) -> None:
     install(settings, late_bars=True)
     confirm(settings)
     store, task_id = run(settings)
-    assert "日线" in failed(store, task_id)
+    assert "日线有 1 行不在 2024-01-02 至 2024-01-05 之间" in failed(store, task_id)
     assert DataStore(settings.data_dir).head() is None
 
 

@@ -20,6 +20,7 @@ export interface PluginEndpoint {
   default: string;
   state: EndpointState;
   configured: string | null;
+  /** state 为 confirmed 时是插件拿到并放行的地址；其余状态下是清单的 default，只是显示用，插件拿不到也连不上 */
   effective: string;
   confirmed_at: string | null;
   /** 当前清单 endpoints 那一节的哈希，确认时原样传回 */

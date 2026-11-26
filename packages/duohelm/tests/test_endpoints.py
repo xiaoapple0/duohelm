@@ -179,7 +179,7 @@ def test_endpoints_change_requires_reconfirmation(store: EndpointStore) -> None:
     store.confirm(manifest(), "svc", "192.168.31.5:58610", confirmed=True)
     # 插件升版本：不需要重新确认
     assert store.addresses_for(manifest(version="1.1.0")) == {"svc": "192.168.31.5:58610"}
-    # endpoints 这一节变了：已保存的地址停用，用 default，直到重新确认
+    # endpoints 这一节变了：已保存的地址停用；页面预填 default，插件拿不到地址，直到重新确认
     changed = manifest(description="新说明")
     (view,) = store.views(changed)
     assert view.state == "needs_confirmation"

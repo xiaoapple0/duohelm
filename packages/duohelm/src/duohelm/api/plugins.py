@@ -33,6 +33,8 @@ class EndpointOut(BaseModel):
     那一节变了，已保存的地址在重新确认之前不使用。"""
     configured: str | None
     effective: str
+    """state 为 confirmed 时是插件拿到并放行的地址；其余状态下是清单的 default，只是显示用，
+    插件拿不到它，也连不上。"""
     confirmed_at: datetime | None
     digest: str
     """当前清单 endpoints 那一节的哈希，确认时原样传回。"""

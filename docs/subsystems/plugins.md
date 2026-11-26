@@ -152,7 +152,7 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 | 结束进程树 | Windows 用 Job Object，进程以挂起状态启动、加入 Job 后再恢复，venv 启动器之后启动的解释器和插件启动的所有进程都在 Job 里；加入 Job 失败时不恢复，直接结束这个挂起的进程并报错；POSIX 用独立的进程组，外加 psutil 找到的子进程 | POSIX 上调用 `setsid` 脱离进程组、并且在结束时已经找不到的孙进程 |
 | 内存 | 整棵进程树 2 GiB（`DUOHELM_PLUGIN_MEMORY_MB`）。Windows 是 Job Object 硬限制；所有平台的父进程每 0.5 秒检查一次 RSS，超限就结束 | Linux 和 macOS 上两次检查之间的瞬时峰值 |
 | 环境变量 | 只继承白名单里的系统变量；`HOME`、`TEMP` 等指向会话临时目录。`DUOHELM_*`、代理设置和一切凭据都不传 | — |
-| 网络 | **Python 层**拦截：替换 `socket` 模块里的连接、解析和发送入口，以及 Windows 上 asyncio Proactor 的连接和 UDP 发送；只放行用户确认过的 `permissions.network` 和 endpoint 地址（逐个匹配主机和端口）；没确认的 endpoint 地址不交给插件，主机名必须解析到公网 IP；反向解析、Unix 套接字、`sendmsg` 一律拒绝 | 原生扩展、ctypes、厂商 DLL / so 直接调用系统接口（如 xtquant 连接 MiniQMT），插件代码写死地址交给它们时照样能连上；插件启动的子进程（如调用 curl）不继承拦截（#7） |
+| 网络 | **Python 层**拦截：替换 `socket` 模块里的连接、解析和发送入口，以及 Windows 上 asyncio Proactor 的连接和 UDP 发送；只放行用户确认过的 `permissions.network` 和 endpoint 地址（逐个匹配主机和端口），`network` 里的主机名必须解析到公网 IP；没确认的 endpoint 地址不交给插件；反向解析、Unix 套接字、`sendmsg` 一律拒绝 | 原生扩展、ctypes、厂商 DLL / so 直接调用系统接口（如 xtquant 连接 MiniQMT），插件代码写死地址交给它们时照样能连上；插件启动的子进程（如调用 curl）不继承拦截（#7） |
 | 文件系统 | 不限制 | 插件可以读写当前用户能访问的任何文件 |
 | 凭据 | 子进程拿不到任何凭据。存储和注入见 [#6](https://github.com/xiaoapple0/duohelm/issues/6) | — |
 
@@ -202,7 +202,7 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 
 ### 变更记录
 
-**SDK 0.4.0（M1）**，不兼容：`permissions.network` 的含义收紧。0.3 下有效的清单（`network` 里写了本机或局域网地址）在 0.4 下无效，按“改变含义是不兼容改动”升次版本号：
+**SDK 0.4.0（M1）**，不兼容，有两项：`permissions.network` 的含义收紧，0.3 下有效的清单（`network` 里写了本机或局域网地址）在 0.4 下无效；`endpoint()` 遇到没确认的 endpoint 从返回 `default` 改为报错。按“改变含义是不兼容改动”升次版本号：
 
 - `network` 只允许公网地址：解析清单时拒绝本机、私有网段、链路本地、保留地址（包括 `127.1`、`0x7f.0.0.1` 这类数字或十六进制写法），以及 `localhost`、`*.localhost`、`*.local`、`*.lan`、`*.internal`、`*.home.arpa`，报错信息提示改用 `[[permissions.endpoints]]`
 - `endpoint()` 在平台里遇到用户还没确认的 endpoint（包括需要重新确认的），抛 `EndpointNotConfiguredError`，0.3 返回清单的 `default`。这样原生扩展（不经过 Python 层的网络拦截）在用户确认之前也拿不到地址（#27）
@@ -212,12 +212,12 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 
 - `network` 的整个列表要用户在插件页确认后才放行，列表变了要重新确认
 - 运行时 netguard 按实际解析出的 IP 检查：`network` 里的主机名解析到本机或私有网段时拦截
-- 没确认过的 endpoint 一律不放行，包括清单的 `default`；插件也拿不到这个地址（见上一条）
+- 没确认过的 endpoint 一律不放行，包括清单的 `default`；插件也拿不到这个地址（见上面 `endpoint()` 那一条）
 
 迁移：
 
 - `network` 里写了本机或局域网地址的插件，改用 `[[permissions.endpoints]]`（例如 xtdata 的 `127.0.0.1:58610` 改为 `miniqmt` endpoint，scope 为 `lan`），清单的 `sdk` 写 `">=0.4,<0.5"`
-- `network` 只写了公网地址（或为空）的插件不需要改代码，把清单的 `sdk` 放宽为 `">=0.3,<0.5"` 即可
+- `network` 只写了公网地址（或为空）、并且没有用 `[[permissions.endpoints]]` 的插件不需要改代码，把清单的 `sdk` 放宽为 `">=0.3,<0.5"` 即可
 - 用 endpoints 的插件：用户确认之前 `endpoint()` 会抛 `EndpointNotConfiguredError`，捕获后把消息报告给用户（实现了 `check_connection` 的，在这里返回 `ok=False` 和这条消息）；不要退回到代码里写死的地址
 - 官方插件：xtdata 改用 `endpoint("miniqmt")`、实现 `check_connection`，`sdk` 写 `">=0.4,<0.5"`；eltdx 按上面的规则调整 `sdk` 范围。两者在插件仓库单独提 PR
 

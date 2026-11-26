@@ -332,6 +332,8 @@ def test_bad_listing_inputs_raise() -> None:
         (date(2023, 4, 10), date(2023, 4, 11), None),  # 交易日早于上市日，序号未知
         (date(2023, 4, 12), date(2023, 4, 10), 4),  # 两个自然日放不下 4 个交易日
         (date(2023, 4, 12), date(2023, 4, 10), 9),  # 同上，序号大于 5 也检查
+        (date(2023, 5, 20), date(2023, 4, 10), 3),  # 序号 <= 5 但上市日在 40 天前
+        (date(2023, 5, 10), date(2023, 4, 10), 5),  # 刚好 30 个自然日
     ],
 )
 def test_inconsistent_listing_inputs_are_unknown(day: date, listing: date, idx: int | None) -> None:

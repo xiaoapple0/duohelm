@@ -216,7 +216,9 @@ def _find_ratio(board: Board, day: date, is_st: bool | None) -> RatioRule | str:
     return first
 
 
-def _inconsistent(day: date, listing: date | None, index: int | None) -> str | None:
+def _inconsistent(  # noqa: PLR0911  逐项检查，每项一个原因
+    day: date, listing: date | None, index: int | None
+) -> str | None:
     """上市日期、上市第几个交易日和交易日互相矛盾时返回原因。"""
     if listing is None:
         return None
@@ -228,6 +230,10 @@ def _inconsistent(day: date, listing: date | None, index: int | None) -> str | N
         return f"上市第 {index} 个交易日与上市日期 {listing}、交易日 {day} 矛盾"
     if (day - listing).days < index - 1:
         return f"上市日期 {listing} 到交易日 {day} 放不下 {index} 个交易日"
+    if index <= _MAX_INITIAL_DAYS and (day - listing).days >= _NOT_INITIAL_AFTER_DAYS:
+        return (
+            f"上市第 {index} 个交易日与上市日期 {listing} 矛盾：距交易日 {day} 已有 30 个自然日以上"
+        )
     return None
 
 

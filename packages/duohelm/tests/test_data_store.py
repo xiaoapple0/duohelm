@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sqlite3
 from datetime import date
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from duohelm.storage import (
     SnapshotConflictError,
     SnapshotNotFoundError,
 )
+from duohelm.storage import catalog as catalog_module
 from duohelm.storage.datasets import UnknownDatasetError
 from duohelm_sdk.schema import BARS_SCHEMA, SECURITIES_SCHEMA
 
@@ -331,14 +333,51 @@ def test_partition_column_must_be_key() -> None:
 
 def test_scan_registry(store: DataStore) -> None:
     catalog = store.catalog
-    assert catalog.unscanned(["600001.SH", "600002.SH", "600003.SH"]) == [
+    assert catalog.unscanned("a", ["600001.SH", "600002.SH", "600003.SH"]) == [
         "600001.SH",
         "600002.SH",
         "600003.SH",
     ]
-    catalog.record_scan([("600001.SH", True), ("600002.SH", False)])
-    assert catalog.unscanned(["600001.SH", "600002.SH", "600003.SH"]) == ["600003.SH"]
-    assert catalog.scan_summary() == {"scanned": 2, "found": 1}
+    catalog.record_scan("a", [("600001.SH", True), ("600002.SH", False)])
+    assert catalog.unscanned("a", ["600001.SH", "600002.SH", "600003.SH"]) == ["600003.SH"]
+    assert catalog.scan_summary("a") == {"scanned": 2, "found": 1}
+    assert catalog.found_symbols("a") == ["600001.SH"]
     # 扫描记录与快照无关：重新打开也还在
     again = DataStore(store.root)
-    assert again.catalog.unscanned(["600001.SH", "600003.SH"]) == ["600003.SH"]
+    assert again.catalog.unscanned("a", ["600001.SH", "600003.SH"]) == ["600003.SH"]
+
+
+def test_scan_registry_is_per_source(store: DataStore) -> None:
+    """一个数据源没有某个代码，不代表别的数据源也没有。"""
+    catalog = store.catalog
+    catalog.record_scan("a", [("600001.SH", False)])
+    assert catalog.unscanned("b", ["600001.SH"]) == ["600001.SH"]
+    assert catalog.scan_summary("b") == {"scanned": 0, "found": 0}
+
+
+def test_scan_found_is_never_cleared(store: DataStore) -> None:
+    """扫到过的代码不会被后来的“没找到”改掉：之后每次同步都要重新查询它。"""
+    catalog = store.catalog
+    catalog.record_scan("a", [("600001.SH", True)])
+    catalog.record_scan("a", [("600001.SH", False)])
+    assert catalog.found_symbols("a") == ["600001.SH"]
+
+
+def test_catalog_v1_migrates_and_keeps_old_scan_table(tmp_path: Path) -> None:
+    """v1 的目录库升级到 v2：旧的扫描表改名保留，不删除。"""
+    path = tmp_path / "catalog.db"
+    conn = sqlite3.connect(path)
+    for statement in catalog_module._SCHEMA_V1.split(";"):  # pyright: ignore[reportPrivateUsage]
+        if statement.strip():
+            conn.execute(statement)
+    conn.execute("INSERT INTO security_scan VALUES ('600001.SH', 1, 0)")
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+    catalog = catalog_module.Catalog(path)
+    assert catalog.unscanned("a", ["600001.SH"]) == ["600001.SH"]
+    conn = sqlite3.connect(path)
+    assert conn.execute("SELECT symbol FROM security_scan_v1").fetchall() == [("600001.SH",)]
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    conn.close()

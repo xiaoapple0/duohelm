@@ -54,4 +54,7 @@ venv = ".venv"
 
 [tool.pytest.ini_options]
 testpaths = ["packages/duohelm-sdk/tests", "packages/duohelm/tests"]
-addopts = "--import-mode=importlib"
+addopts = "--import-mode=importlib -m \"not local_data\""
+markers = [
+    "local_data: 读取 .local-data/ 下的本地录制数据；默认不运行，用 pytest -m local_data 运行",
+]

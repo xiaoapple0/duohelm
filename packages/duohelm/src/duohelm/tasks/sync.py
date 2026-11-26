@@ -9,6 +9,8 @@
   先按代码区间扫描退市股（:mod:`duohelm.tasks.delisted`，#30），扫完才继续
 - 入库前按 SDK 的契约检查格式；成交量为 0 的行（停牌占位）丢弃
 - 只同步已收盘的日子：盘中的日线不是最终值，不能进快照
+- 每天保存 ST 名单和指数成分的快照（:mod:`duohelm.tasks.snapshots`，#43）：只在同步到最近一个
+  已收盘的日子时写，回补历史时不写
 - 全部数据在一个事务里写入，成功才提交为一个快照；失败、取消时不留下半个快照。重复执行
   只写入有变化的行，同样的数据不会产生新快照
 """
@@ -18,18 +20,27 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Self
 
 import polars as pl
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from duohelm.endpoints import EndpointStore
 from duohelm.isolation.runner import Limits, PluginRunError, PluginSession, session_for
 from duohelm.registry import PluginEntry, PluginRegistry, PluginStatus
 from duohelm.settings import Settings
-from duohelm.storage import DataStore, SnapshotConflictError
+from duohelm.storage import DATASETS, DataStore, SnapshotConflictError
+from duohelm.storage.store import Transaction
 from duohelm.tasks.delisted import discover_securities
+from duohelm.tasks.snapshots import (
+    DEFAULT_INDEXES,
+    SnapshotUnavailableError,
+    fetch_index_members,
+    st_snapshot,
+    stale_keys,
+)
 from duohelm.tasks.types import (
     RetryableError,
     TaskCancelled,
@@ -55,6 +66,8 @@ CLOSE = time(15, 30)
 _RETRYABLE_REASONS = frozenset({"timeout", "crashed"})
 _CANCEL_POLL_S = 1.0
 _MAX_EXAMPLES = 5
+_SNAPSHOT_LOOKBACK = timedelta(days=15)
+"""找快照日期（最近一个交易日）时往前看多少天的日历。春节、国庆最长休市 9 天左右。"""
 
 
 class SyncError(Exception):
@@ -67,6 +80,18 @@ class SyncParams(TaskParams):
     start: date = EARLIEST
     end: date | None = None
     """None 表示执行时最近一个已收盘的日子（见 :func:`last_closed_day`）。"""
+    indexes: list[str] | None = None
+    """保存成分快照的指数代码；None 表示默认的一组宽基指数，空列表表示不保存。"""
+
+    @field_validator("indexes")
+    @classmethod
+    def _check_indexes(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned = [i.strip() for i in value]
+        if any(not i for i in cleaned):
+            raise ValueError("indexes 里有空的指数代码")
+        return list(dict.fromkeys(cleaned))
 
     @model_validator(mode="after")
     def _check_range(self) -> Self:
@@ -95,6 +120,16 @@ class SyncResult(BaseModel):
     """退市股扫描：这次新扫描的代码数。能直接列出退市证券的数据源为 0。"""
     rechecked: int = 0
     """退市股扫描：这次重新查询的、扫到过但不在代码表里的代码数。"""
+    snapshot_date: date | None = None
+    """ST 名单和指数成分快照的日期；这次没有写快照时为 None。"""
+    snapshot_skipped: str | None = None
+    """没有写快照的原因（同步区间早于最近一个已收盘的日子等）；写了为 None。"""
+    st_snapshot_failed: str | None = None
+    """取得了快照日期，但 ST 名单没写的原因（如名称全部为空）。"""
+    st_unknown_names: int = 0
+    """名称为空、ST 状态未知而没有写入的在市股票数。"""
+    index_snapshot_failed: dict[str, str] = Field(default_factory=dict)
+    """没有写成分快照的指数及原因（插件没实现、报错、格式不对、成分为空）。"""
 
 
 def _beijing_now() -> datetime:
@@ -144,7 +179,16 @@ def data_sync(
                 entry, endpoints, deps=deps, limits=run_limits, cancel=cancel, log=plugin_log
             ) as session,
         ):
-            return _run(ctx, session, data, params.start, end, addresses=addresses)
+            return _run(
+                ctx,
+                session,
+                data,
+                params.start,
+                end,
+                addresses=addresses,
+                closed=closed,
+                indexes=DEFAULT_INDEXES if params.indexes is None else tuple(params.indexes),
+            )
 
     return TaskType(
         name="data.sync",
@@ -181,6 +225,8 @@ def _run(
     end: date,
     *,
     addresses: Mapping[str, str],
+    closed: date,
+    indexes: Sequence[str],
 ) -> SyncResult:
     plugin_id = session.entry.id
     ctx.log(f"同步 {plugin_id}：{start} 至 {end}")
@@ -215,7 +261,12 @@ def _run(
         "calendar": 0,
         "bars_1d": 0,
         "adj_factors": 0,
+        "st_daily": 0,
+        "index_members_daily": 0,
     }
+    snap = _prepare_snapshots(
+        ctx, session, securities=securities, end=end, closed=closed, indexes=indexes
+    )
     if not caps.exact_delist_date:
         ctx.log(f"插件 {plugin_id} 的退市日是近似值，记进 delist_date_quality")
     dropped = 0
@@ -229,6 +280,13 @@ def _run(
                 "delist_date_quality", delist_date_quality(securities, caps)
             )
             written["calendar"] = tx.write("calendar", calendar)
+            if snap.day is not None:
+                if snap.st is not None:
+                    written["st_daily"] = _write_day(tx, data, "st_daily", snap.day, snap.st)
+                for index, members in snap.members.items():
+                    written["index_members_daily"] += _write_day(
+                        tx, data, "index_members_daily", snap.day, members, index=index
+                    )
             for i, batch in enumerate(batches):
                 ctx.progress(
                     base + 0.01 + (0.98 - base) * i / len(batches),
@@ -259,7 +317,93 @@ def _run(
         dropped_zero_volume=dropped,
         scanned=scanned,
         rechecked=rechecked,
+        snapshot_date=snap.day,
+        snapshot_skipped=snap.skipped,
+        st_snapshot_failed=snap.st_failed,
+        st_unknown_names=snap.st_unknown,
+        index_snapshot_failed=snap.index_failed,
     )
+
+
+# ---------------------------------------------------------------- ST 名单和指数成分快照
+
+
+@dataclass
+class _Snapshots:
+    day: date | None = None
+    skipped: str | None = None
+    st: pl.DataFrame | None = None
+    st_unknown: int = 0
+    st_failed: str | None = None
+    members: dict[str, pl.DataFrame] = field(default_factory=lambda: {})
+    index_failed: dict[str, str] = field(default_factory=lambda: {})
+
+
+def _prepare_snapshots(
+    ctx: TaskContext,
+    session: PluginSession,
+    *,
+    securities: pl.DataFrame,
+    end: date,
+    closed: date,
+    indexes: Sequence[str],
+) -> _Snapshots:
+    """决定要不要写快照，并取好要写的内容（还没写）。
+
+    快照日期是最近一个已收盘的交易日；同步到的 end 早于最近已收盘的日子时不写：
+    名单是现在的名单，不能当成过去的名单。
+    """
+    if end < closed:
+        reason = (
+            f"同步区间的 end（{end}）早于最近一个已收盘的日子（{closed}），"
+            "现在的名单不能当成过去的名单"
+        )
+        ctx.log(f"不写 ST 名单和指数成分快照：{reason}")
+        return _Snapshots(skipped=reason)
+    calendar = fetch_calendar(session, closed - _SNAPSHOT_LOOKBACK, closed)
+    if not calendar.height:
+        reason = f"{closed - _SNAPSHOT_LOOKBACK} 至 {closed} 的交易日历为空，找不到快照日期"
+        ctx.log(f"不写 ST 名单和指数成分快照：{reason}", "warning")
+        return _Snapshots(skipped=reason)
+    day: date = calendar.get_column("date").max()  # pyright: ignore[reportAssignmentType]
+    snap = _Snapshots(day=day)
+    try:
+        snap.st, snap.st_unknown = st_snapshot(securities, day)
+    except SnapshotUnavailableError as exc:
+        snap.st_failed = str(exc)
+        ctx.log(f"不写 {day} 的 ST 名单：{exc}", "warning")
+    else:
+        ctx.log(f"{day} 的 ST 名单：{snap.st.height} 只")
+        if snap.st_unknown:
+            ctx.log(f"{snap.st_unknown} 只在市股票名称为空，ST 状态未知，没有写入", "warning")
+    for index in indexes:
+        try:
+            snap.members[index] = fetch_index_members(session, index, day)
+        except SnapshotUnavailableError as exc:
+            snap.index_failed[index] = str(exc)
+            ctx.log(f"不写 {day} 的 {index} 成分：{exc}", "warning")
+        else:
+            ctx.log(f"{day} 的 {index} 成分：{snap.members[index].height} 只")
+    return snap
+
+
+def _write_day(
+    tx: Transaction,
+    data: DataStore,
+    dataset: str,
+    day: date,
+    rows: pl.DataFrame,
+    *,
+    index: str | None = None,
+) -> int:
+    """写入 day 的快照。这一天已有的行以这次为准：这次名单里没有的行作废。"""
+    existing = data.read(dataset, start=day, end=day)
+    if index is not None:
+        existing = existing.filter(pl.col("index") == index)
+    stale = stale_keys(existing, rows, list(DATASETS[dataset].keys))
+    if stale.height:
+        tx.delete(dataset, stale)
+    return tx.write(dataset, rows)
 
 
 # ---------------------------------------------------------------- 各步骤

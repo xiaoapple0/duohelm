@@ -124,6 +124,12 @@ def serve(proto_in: BinaryIO, proto_out: BinaryIO) -> int:
         if method not in allowed:
             write_message(proto_out, _error("protocol", ProtocolError(f"不允许调用 {method}")))
             continue
+        if not callable(getattr(plugin, method, None)):
+            # 可选的方法（如 check_connection）插件可以不实现，调用方据此跳过
+            write_message(
+                proto_out, _error("unsupported", NotImplementedError(f"插件没有实现 {method}"))
+            )
+            continue
         try:
             args = decode(message.get("args", []), inputs)
             kwargs = decode(message.get("kwargs", {}), inputs)

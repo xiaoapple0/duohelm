@@ -47,8 +47,17 @@ from duohelm_sdk.checks import check_factor_output
 logger = logging.getLogger(__name__)
 
 FailureReason = Literal[
-    "timeout", "memory", "cancelled", "crashed", "load", "plugin_error", "protocol", "contract"
+    "timeout",
+    "memory",
+    "cancelled",
+    "crashed",
+    "load",
+    "plugin_error",
+    "protocol",
+    "contract",
+    "unsupported",
 ]
+"""``unsupported``：插件没有实现这个方法（只会出现在可选的方法上，如 check_connection）。"""
 SUPPORTED_KINDS = frozenset({"factor", "datasource"})
 
 # 子进程只继承这些环境变量。凭据、DUOHELM_* 配置、代理设置等一律不传。
@@ -552,7 +561,7 @@ class PluginSession:
 def _from_error(reply: Mapping[str, Any]) -> PluginRunError:
     kind = str(reply.get("kind", "plugin_error"))
     reason: FailureReason
-    if kind in ("memory", "load", "protocol", "plugin_error"):
+    if kind in ("memory", "load", "protocol", "plugin_error", "unsupported"):
         reason = cast(FailureReason, kind)
     else:
         reason = "plugin_error"

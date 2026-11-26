@@ -1,0 +1,348 @@
+"""data.sync：从任务入口跑到隔离进程里的行情源插件，再到快照（#24）。"""
+
+from __future__ import annotations
+
+import json
+import textwrap
+import threading
+import time
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+import polars as pl
+import pydantic
+import pytest
+
+from duohelm.endpoints import EndpointStore
+from duohelm.isolation import Limits, PluginRunError
+from duohelm.registry import PluginRegistry
+from duohelm.settings import Settings
+from duohelm.storage import DataStore
+from duohelm.tasks import RetryableError, TaskStore, TaskTypeRegistry, Worker
+from duohelm.tasks.sync import SyncParams, SyncResult, data_sync, shanghai_today
+from duohelm.tasks.sync import _plugin_errors as plugin_errors  # pyright: ignore[reportPrivateUsage]
+
+FAST = Limits(call_timeout_s=60, startup_timeout_s=60, poll_interval_s=0.1)
+START, END = date(2024, 1, 2), date(2024, 1, 5)
+
+MANIFEST = """
+[plugin]
+id = "fake-src"
+name = "fake-src"
+version = "1.0.0"
+kind = "datasource"
+sdk = ">=0.4,<0.5"
+entrypoint = "fake_src:source"
+
+[[permissions.endpoints]]
+id = "src"
+description = "测试行情服务"
+default = "127.0.0.1:1"
+scope = "loopback"
+"""
+
+PLUGIN_CODE = """
+import json
+import time
+from datetime import date
+from pathlib import Path
+
+import polars as pl
+from duohelm_sdk import Capabilities, ConnectionStatus, EndpointNotConfiguredError, Freq, endpoint
+from duohelm_sdk.schema import ADJ_FACTORS_SCHEMA, BARS_SCHEMA, SECURITIES_SCHEMA
+
+HERE = Path(__file__).parent
+B = json.loads((HERE / "behavior.json").read_text(encoding="utf-8"))
+CALENDAR = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5)]
+SECURITIES = [
+    ("000001.SH", "上证指数", "SH", "index", date(1990, 12, 19), None),
+    ("000001.SZ", "平安银行", "SZ", "stock", date(1991, 4, 3), None),
+    ("600000.SH", "浦发银行", "SH", "stock", date(1999, 11, 10), None),
+    ("600001.SH", "邯郸钢铁", "SH", "stock", date(1998, 1, 22), date(2009, 12, 25)),
+    ("600005.SH", "武钢股份", "SH", "stock", date(1999, 8, 3), date(2024, 1, 3)),
+    ("830000.NQ", "新三板", "NQ", "stock", date(2020, 1, 2), None),
+]
+
+
+def record(name):
+    with (HERE / "calls.txt").open("a", encoding="utf-8") as f:
+        f.write(name + "\\n")
+
+
+class Plain:
+    def capabilities(self):
+        record("capabilities")
+        return Capabilities(
+            markets=("CN",),
+            freqs=(Freq.DAY,),
+            fields=("open", "high", "low", "close", "volume", "amount"),
+            lists_delisted=B.get("lists_delisted", True),
+        )
+
+    def securities(self, *, include_delisted=False):
+        record(f"securities include_delisted={include_delisted}")
+        return pl.DataFrame(SECURITIES, schema=SECURITIES_SCHEMA, orient="row")
+
+    def lookup_securities(self, symbols):
+        raise NotImplementedError
+
+    def trading_calendar(self, market, start, end):
+        record(f"trading_calendar {market}")
+        return pl.DataFrame({"date": [d for d in CALENDAR if start <= d <= end]})
+
+    def bars(self, symbols, freq, start, end):
+        record(f"bars {','.join(symbols)}")
+        if B.get("slow_bars"):
+            time.sleep(30)
+        rows = []
+        for s in symbols:
+            last = date(2024, 1, 3) if s == "600005.SH" else end
+            for d in CALENDAR:
+                if start <= d <= last:
+                    volume = 0.0 if (s, d) == ("000001.SZ", date(2024, 1, 3)) else 1000.0
+                    rows.append((d, s, 10.0, 11.0, 9.0, 10.5, volume, volume * 10.5))
+        if B.get("bad_bars"):
+            rows.append((start, "999999.SH", 1.0, 1.0, 1.0, 1.0, 1.0, 1.0))
+        return pl.DataFrame(rows, schema=BARS_SCHEMA, orient="row")
+
+    def adj_factors(self, symbols, start, end):
+        record("adj_factors")
+        rows = [(date(2024, 1, 4), "600000.SH", 1.05)] if "600000.SH" in symbols else []
+        return pl.DataFrame(rows, schema=ADJ_FACTORS_SCHEMA, orient="row")
+
+    def index_constituents(self, index, start, end):
+        raise NotImplementedError
+
+
+class Checked(Plain):
+    def check_connection(self):
+        record("check_connection")
+        try:
+            address = endpoint("src")
+        except EndpointNotConfiguredError as exc:
+            return ConnectionStatus(ok=False, message=str(exc))
+        return ConnectionStatus(ok=True, message=f"已连接 {address}")
+
+
+source = Checked() if B.get("check", True) else Plain()
+"""
+
+
+@pytest.fixture
+def settings(tmp_path: Path) -> Settings:
+    return Settings(home=tmp_path / "home")
+
+
+def install(settings: Settings, **behavior: Any) -> Path:
+    path = settings.plugin_dir / "fake-src"
+    path.mkdir(parents=True)
+    (path / "duohelm-plugin.toml").write_text(MANIFEST, encoding="utf-8")
+    (path / "fake_src.py").write_text(textwrap.dedent(PLUGIN_CODE), encoding="utf-8")
+    (path / "behavior.json").write_text(json.dumps(behavior), encoding="utf-8")
+    return path
+
+
+def confirm(settings: Settings, address: str = "127.0.0.1:58612") -> None:
+    """用户在插件页确认地址（和 API 用的是同一个存储）。"""
+    [entry] = PluginRegistry([settings.plugin_dir]).scan()
+    assert entry.manifest is not None, entry.problems
+    EndpointStore(settings.plugin_config_path).confirm(
+        entry.manifest, "src", address, confirmed=True
+    )
+
+
+def calls(plugin: Path) -> list[str]:
+    path = plugin / "calls.txt"
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+def submit(settings: Settings, **params: Any) -> tuple[TaskStore, TaskTypeRegistry, int]:
+    store = TaskStore(settings.db_path)
+    types = TaskTypeRegistry([data_sync(settings, limits=FAST)])
+    body = {"plugin_id": "fake-src", "start": START.isoformat(), "end": END.isoformat(), **params}
+    task = store.create("data.sync", types.validate_params("data.sync", body), max_attempts=1)
+    return store, types, task.id
+
+
+def run(settings: Settings, **params: Any) -> tuple[TaskStore, int]:
+    store, types, task_id = submit(settings, **params)
+    assert Worker(store, types).run_once()
+    return store, task_id
+
+
+def result_of(store: TaskStore, task_id: int) -> SyncResult:
+    task = store.get(task_id)
+    assert task.status == "succeeded", (task.error, [log.message for log in store.logs(task_id)])
+    assert task.result is not None
+    return SyncResult.model_validate_json(task.result)
+
+
+def failed(store: TaskStore, task_id: int) -> str:
+    task = store.get(task_id)
+    assert task.status == "failed", task.status
+    assert task.error is not None
+    return task.error
+
+
+# ---- 完整路径 ----
+
+
+def test_sync_uses_confirmed_address_and_writes_snapshot(settings: Settings) -> None:
+    """用户确认地址后，从同步任务的入口跑到插件里，插件拿到的是确认过的地址。"""
+    plugin = install(settings)
+    confirm(settings, "127.0.0.1:58612")
+    store, task_id = run(settings)
+    result = result_of(store, task_id)
+
+    assert result.connection == "已连接 127.0.0.1:58612"
+    assert calls(plugin)[:3] == [
+        "check_connection",
+        "capabilities",
+        "securities include_delisted=True",
+    ]
+    # 不认识的交易所（NQ）跳过；2009 年退市的不在区间内，不取日线
+    assert result.securities == 5
+    assert result.symbols == 4
+    assert result.dropped_zero_volume == 1
+    assert result.snapshot_id is not None
+
+    data = DataStore(settings.data_dir)
+    assert data.head() == result.snapshot_id
+    assert data.catalog.snapshot(result.snapshot_id).task_id == task_id
+    bars = data.read("bars_1d")
+    assert bars.height == 4 * 4 - 2 - 1  # 600005 退市后没有 2 天，平安银行丢弃 1 行成交量为 0
+    assert bars.filter(pl.col("volume") == 0).height == 0
+    assert data.read("calendar").get_column("date").to_list() == [
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        date(2024, 1, 4),
+        date(2024, 1, 5),
+    ]
+    assert data.read("adj_factors").rows() == [(date(2024, 1, 4), "600000.SH", 1.05)]
+    securities = data.read("securities")
+    assert "830000.NQ" not in securities.get_column("symbol").to_list()
+    assert result.written == {"securities": 5, "calendar": 4, "bars_1d": 13, "adj_factors": 1}
+
+
+def test_rerun_writes_nothing(settings: Settings) -> None:
+    """重复执行只写有变化的行：同样的数据不产生新快照。"""
+    install(settings)
+    confirm(settings)
+    store, first = run(settings)
+    head = result_of(store, first).snapshot_id
+    store, second = run(settings)
+    result = result_of(store, second)
+    assert result.snapshot_id is None
+    assert set(result.written.values()) == {0}
+    assert DataStore(settings.data_dir).head() == head
+
+
+# ---- 开始前的检查 ----
+
+
+def test_unconfirmed_endpoint_fails_before_download(settings: Settings) -> None:
+    """没确认地址：check_connection 不通过，任务直接失败，提示去插件页确认，不下载。"""
+    plugin = install(settings)
+    store, task_id = run(settings)
+    error = failed(store, task_id)
+    assert "连接检查没有通过" in error and "插件页确认" in error
+    assert calls(plugin) == ["check_connection"]
+    assert DataStore(settings.data_dir).head() is None
+
+
+def test_plugin_without_check_connection_is_not_checked(settings: Settings) -> None:
+    plugin = install(settings, check=False)
+    store, task_id = run(settings)
+    assert result_of(store, task_id).connection is None
+    assert "check_connection" not in calls(plugin)
+
+
+def test_source_without_delisted_list_is_refused(settings: Settings) -> None:
+    """不能列出退市证券的数据源暂不同步：只同步在市证券会有幸存者偏差。"""
+    plugin = install(settings, lists_delisted=False)
+    confirm(settings)
+    store, task_id = run(settings)
+    assert "幸存者偏差" in failed(store, task_id)
+    assert calls(plugin) == ["check_connection", "capabilities"]
+    assert DataStore(settings.data_dir).head() is None
+
+
+def test_unknown_plugin_fails(settings: Settings) -> None:
+    settings.plugin_dir.mkdir(parents=True)
+    store, task_id = run(settings, plugin_id="nope")
+    assert "找不到插件 nope" in failed(store, task_id)
+
+
+# ---- 数据不合格、取消：不留下快照 ----
+
+
+def test_bad_bars_abort_without_snapshot(settings: Settings) -> None:
+    install(settings, bad_bars=True)
+    confirm(settings)
+    store, task_id = run(settings)
+    assert "没有请求的证券" in failed(store, task_id)
+    data = DataStore(settings.data_dir)
+    assert data.head() is None
+    assert list(data.files_dir.rglob("*.parquet")) == []  # 已写的文件随事务中止删除
+
+
+def test_cancel_stops_long_plugin_call(settings: Settings) -> None:
+    """取消运行中的同步：正在进行的插件调用被立即结束，不等它返回，也不留下快照。"""
+    plugin = install(settings, slow_bars=True)
+    confirm(settings)
+    store, types, task_id = submit(settings)
+    worker = threading.Thread(target=Worker(store, types).run_once)
+    worker.start()
+    deadline = time.monotonic() + 60
+    while not any(c.startswith("bars") for c in calls(plugin)):
+        assert time.monotonic() < deadline, calls(plugin)
+        time.sleep(0.1)
+    cancelled_at = time.monotonic()
+    store.request_cancel(task_id)
+    worker.join(timeout=60)
+    assert not worker.is_alive()
+    assert time.monotonic() - cancelled_at < 20  # 插件的 bars 要睡 30 秒
+    assert store.get(task_id).status == "cancelled"
+    assert DataStore(settings.data_dir).head() is None
+
+
+# ---- 小单元 ----
+
+
+class _Ctx:
+    def __init__(self) -> None:
+        self.logs: list[str] = []
+
+    def log(self, message: str, level: str = "info") -> None:
+        self.logs.append(message)
+
+    def check_cancelled(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [("timeout", RetryableError), ("crashed", RetryableError), ("memory", Exception)],
+)
+def test_plugin_errors_retry_only_transient(reason: str, expected: type[Exception]) -> None:
+    ctx: Any = _Ctx()
+    with pytest.raises(expected) as info, plugin_errors(ctx, "p"):
+        raise PluginRunError(reason, "x")  # type: ignore[arg-type]
+    if expected is Exception:
+        assert not isinstance(info.value, RetryableError)
+
+
+def test_params_validation() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        SyncParams(plugin_id="p", start=date(2024, 1, 5), end=date(2024, 1, 2))
+    with pytest.raises(pydantic.ValidationError):
+        SyncParams.model_validate({"plugin_id": "p", "extra": 1})
+    assert SyncParams(plugin_id="p").start == date(1990, 12, 19)
+
+
+def test_shanghai_today_uses_beijing_date() -> None:
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    late_utc = datetime(2024, 1, 2, 17, 0, tzinfo=UTC)  # 北京时间 1 月 3 日 01:00
+    assert shanghai_today(lambda: late_utc) == date(2024, 1, 3)

@@ -35,7 +35,15 @@ def make(tmp_path: Path, *, dev: bool = False) -> tuple[TestClient, Worker]:
 def test_task_types(tmp_path: Path) -> None:
     client, _ = make(tmp_path)
     names = [t["name"] for t in client.get("/api/task-types").json()]
-    assert names == ["plugins.scan"]
+    assert names == ["data.sync", "plugins.scan"]
+
+
+def test_data_sync_params_are_validated(tmp_path: Path) -> None:
+    client, _ = make(tmp_path)
+    bad = {"plugin_id": "xtdata", "start": "2024-01-05", "end": "2024-01-02"}
+    assert client.post("/api/tasks", json={"type": "data.sync", "params": bad}).status_code == 422
+    missing = client.post("/api/tasks", json={"type": "data.sync", "params": {}})
+    assert missing.status_code == 422
 
 
 def test_demo_sleep_only_in_dev(tmp_path: Path) -> None:

@@ -37,6 +37,11 @@ class Settings:
         """元数据库：任务等。"""
         return self.home / "duohelm.db"
 
+    @property
+    def plugin_config_path(self) -> Path:
+        """插件的用户配置：用户确认过的连接地址（endpoints）及审计记录。不进任何仓库。"""
+        return self.home / "plugin-config.db"
+
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
         """读取 DUOHELM_HOME（默认 ~/.duohelm）、DUOHELM_DEV、DUOHELM_TASK_WORKERS。"""

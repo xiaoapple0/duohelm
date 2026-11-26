@@ -80,13 +80,17 @@ scope 规则（`duohelm_sdk.endpoints.parse_address`）：
 
 所有 scope 都要求写端口，不接受 `0.0.0.0`、组播地址、带网卡后缀的 IPv6 地址、协议和路径。
 
-平台的流程（随平台实现一起落地）：
+平台的流程（`duohelm.endpoints`、`duohelm.api.plugins`、`duohelm.isolation`）：
 
-- 用户在插件页填写地址并确认后，平台才保存。地址保存在 `DUOHELM_HOME` 下的数据库里，不进任何仓库
-- 地址是否符合 scope 由平台校验两次：**保存时**一次，**启动插件子进程、传地址之前**再一次
-- 需要重新确认的情况：清单里 `[[permissions.endpoints]]` 这一节变了（按这一节的哈希判断，插件升版本、改描述等清单其他部分的改动不算），或用户改了地址。重新确认之前，插件只能用 `default`
-- 每次确认都记审计日志；质量报告和任务日志里不写具体地址
-- Python 层的网络拦截按“`network` + 已确认的 endpoint”逐个精确放行主机和端口。原生扩展（如 xtquant）不经过这层拦截，靠的是平台只把确认过的地址传给插件（威胁模型见下）
+- 用户在 Web 的插件页展开插件，点“设置”填写地址，勾选“我确认：插件 X 将可以连接 Y”后才保存（API：`PUT /api/plugins/{id}/endpoints/{endpoint_id}`，`confirm` 必须为 true；scope 为 internet 时还要 `confirm_internet`）。“恢复默认”删除用户的地址（`DELETE`）
+- 地址保存在 `DUOHELM_HOME/plugin-config.db`（表 `plugin_endpoints`），不进任何仓库
+- 地址是否符合 scope 由平台校验两次，用的都是 `duohelm_sdk.parse_address`：
+  - **保存时**：`EndpointStore.confirm`，不合格返回 422
+  - **启动插件子进程、传地址之前**：`PluginSession.start` 调用 `checked_addresses`，不合格时不启动子进程，报 `load` 错误
+- 需要重新确认的情况：清单里 `[[permissions.endpoints]]` 这一节变了。按这一节规范化 JSON 的 sha256 判断（`endpoints_digest`），插件升版本、改插件名称或说明、改 `network` 等清单其他部分的改动都不算；endpoint 自己的 `description`、`default`、`scope` 变了算。需要重新确认时，页面显示“需要重新确认”，插件拿到的是 `default`，已保存的地址在用户重新确认之前不使用
+- 每次确认、清除都记进审计表 `endpoint_audit`（旧地址、新地址、当时的哈希、时间），只在本机数据库里。普通日志、质量报告和任务日志里不写具体地址
+- 子进程收到 `start` 后、导入插件代码之前，按“清单的 `network` + 传给插件的 endpoint 地址”设置网络白名单，并设置 `duohelm_sdk.endpoint()` 能取到的地址。白名单逐个精确匹配主机和端口；白名单里的主机名解析出来的 IP，按主机名那一项的端口规则放行。原生扩展（如 xtquant）不经过这层拦截，靠的是平台只把确认过的地址传给插件（威胁模型见下）
+- 实现了 `check_connection` 的插件，平台可以在隔离进程里调用它（同步任务里接入）
 
 ## 加载流程
 
@@ -135,7 +139,7 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 | 结束进程树 | Windows 用 Job Object，进程以挂起状态启动、加入 Job 后再恢复，venv 启动器之后启动的解释器和插件启动的所有进程都在 Job 里；加入 Job 失败时不恢复，直接结束这个挂起的进程并报错；POSIX 用独立的进程组，外加 psutil 找到的子进程 | POSIX 上调用 `setsid` 脱离进程组、并且在结束时已经找不到的孙进程 |
 | 内存 | 整棵进程树 2 GiB（`DUOHELM_PLUGIN_MEMORY_MB`）。Windows 是 Job Object 硬限制；所有平台的父进程每 0.5 秒检查一次 RSS，超限就结束 | Linux 和 macOS 上两次检查之间的瞬时峰值 |
 | 环境变量 | 只继承白名单里的系统变量；`HOME`、`TEMP` 等指向会话临时目录。`DUOHELM_*`、代理设置和一切凭据都不传 | — |
-| 网络 | **Python 层**拦截：替换 `socket` 模块里的连接、解析和发送入口，M0 不放行任何主机。清单中的 `permissions.network` 在 M1 连同用户确认流程一起实现 | 原生扩展、ctypes、厂商 DLL / so 直接调用系统接口 |
+| 网络 | **Python 层**拦截：替换 `socket` 模块里的连接、解析和发送入口，只放行清单的 `permissions.network` 和传给插件的 endpoint 地址（逐个匹配主机和端口）；反向解析、Unix 套接字、`sendmsg` 一律拒绝 | 原生扩展、ctypes、厂商 DLL / so 直接调用系统接口（如 xtquant 连接 MiniQMT） |
 | 文件系统 | 不限制 | 插件可以读写当前用户能访问的任何文件 |
 | 凭据 | 子进程拿不到任何凭据。存储和注入见 [#6](https://github.com/xiaoapple0/duohelm/issues/6) | — |
 
@@ -146,7 +150,7 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 - stderr 作为插件日志转给调用方，每次会话最多 256 KiB，超出部分丢弃，并记一条说明
 - 数据表用 Arrow IPC 文件在会话临时目录里传递。读取时先把整个文件读进内存再解析，不做内存映射，读完立即删除文件（Windows 上被映射的文件删不掉）
 - 子进程只接受规定的方法：因子插件只有 `compute`，行情源插件只有协议里的五个方法。交易接口插件和算子插件不能单独在隔离进程里运行：算子只在依赖它的因子插件的子进程里加载，算子返回的 polars 表达式永远不跨进程
-- 平台在发出 `start` 之后，子进程才导入插件代码；在此之前已经完成 fd 重定向、网络拦截，以及（Windows 上）加入 Job
+- 平台在发出 `start` 之后，子进程才导入插件代码；在此之前已经完成 fd 重定向、网络拦截，以及（Windows 上）加入 Job。`start` 消息带上网络白名单（`network`）和 endpoint 地址（`endpoints`），子进程先按它们设置好，再导入插件
 
 ### 错误分类（`PluginRunError.reason`）
 

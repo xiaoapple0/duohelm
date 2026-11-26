@@ -27,6 +27,7 @@ from typing import Any, BinaryIO, Literal, Self, cast
 import polars as pl
 import psutil
 
+from duohelm.endpoints import EndpointConfigError, checked_addresses
 from duohelm.isolation.protocol import (
     FrameStore,
     ProtocolError,
@@ -134,7 +135,11 @@ class PluginSession:
         limits: Limits | None = None,
         cancel: threading.Event | None = None,
         log: Callable[[str], None] | None = None,
+        endpoints: Mapping[str, str] | None = None,
     ) -> None:
+        """``endpoints``：要传给插件的连接地址（endpoint id -> ``主机:端口``），通常来自
+        :meth:`duohelm.endpoints.EndpointStore.addresses_for`；没给的用清单的 default。
+        启动子进程之前按 scope 再校验一次。"""
         if entry.status is not PluginStatus.READY or entry.manifest is None:
             raise PluginRunError("load", f"插件 {entry.id} 的状态是 {entry.status}，不能运行")
         info = entry.manifest.plugin
@@ -149,6 +154,8 @@ class PluginSession:
         self._log: Callable[[str], None] = log or self._default_log
         self._kind = info.kind
         self._entrypoint = info.entrypoint
+        self._manifest = entry.manifest
+        self._endpoint_texts: dict[str, str] = dict(endpoints or {})
 
         self.workdir: Path | None = None
         self._proc: subprocess.Popen[bytes] | None = None
@@ -194,6 +201,12 @@ class PluginSession:
         return self._interpreter_pid
 
     def start(self) -> None:
+        # 第二次校验：启动子进程、传地址之前，按清单里的 scope 再校验一次。
+        try:
+            addresses = checked_addresses(self._manifest, self._endpoint_texts)
+        except EndpointConfigError as exc:
+            raise PluginRunError("load", str(exc)) from None
+        network = [*self._manifest.permissions.network, *(str(a) for a in addresses.values())]
         workdir = Path(tempfile.mkdtemp(prefix="duohelm-plugin-"))
         self.workdir = workdir
         self._inputs = FrameStore(workdir, "in")
@@ -251,6 +264,8 @@ class PluginSession:
                 "sys_path": [str(e.path) for e in (self.entry, *self.deps)],
                 "entrypoint": self._entrypoint,
                 "kind": self._kind,
+                "network": network,
+                "endpoints": {k: {"host": a.host, "port": a.port} for k, a in addresses.items()},
             }
         )
         started = self._receive(self.limits.startup_timeout_s)

@@ -8,6 +8,7 @@
 | 因子引擎与算子 | [factor-engine.md](factor-engine.md) | `packages/duohelm-sdk/src/duohelm_sdk/checks.py` | M0 只有契约检查 |
 | 行情与数据 | [data.md](data.md) | `packages/duohelm-sdk/src/duohelm_sdk/schema.py`、`packages/duohelm/src/duohelm/storage/` | M1 进行中：存储与快照已实现 |
 | 任务系统 | [tasks.md](tasks.md) | `packages/duohelm/src/duohelm/tasks/`、`packages/duohelm/src/duohelm/api/tasks.py` | M0 已实现 |
+| 市场与交易规则 | [market.md](market.md) | `packages/duohelm/src/duohelm/market/` | A 股涨跌停价、整手已实现（#45），规则来源未核对原文；交易日历、T+1、停牌未开始 |
 | 交易执行 | [execution.md](execution.md) | 未开始 | M6 |
 | API 与 Web | 本页下方 | `packages/duohelm/src/duohelm/api/`、`web/` | M0 进行中 |
 

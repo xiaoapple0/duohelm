@@ -61,7 +61,8 @@ description = "价格和成交量排名的10日相关系数取反"
 `network` 列出插件要连接的**公网**主机名或公网 IP，可以带端口（`api.example.com`、`1.2.3.4:443`）。
 
 - 解析清单时拒绝本机、私有网段、链路本地、保留地址（`127.0.0.1`、`10.x`、`172.16–31.x`、`192.168.x`、`169.254.x`、`100.64/10`、文档保留地址等），以及 `localhost`、`*.localhost`、`*.local`、`*.lan`、`*.internal`、`*.home.arpa`。本机或局域网的服务用下面的 endpoints，由用户填写并确认地址
-- **整个列表由用户确认一次**才放行：Web 插件页显示地址数量和完整列表，用户点“确认放行”（API：`PUT /api/plugins/{id}/network`，`confirm` 必须为 true）。**确认之前插件不能联网**
+- **整个列表由用户确认一次**才放行：Web 插件页显示地址数量和完整列表，用户点“确认放行”（API：`PUT /api/plugins/{id}/network`，`confirm` 必须为 true，`digest` 必须是页面上显示的 `NetworkOut.digest`）。**确认之前插件不能联网**
+- `digest` 防止确认一个没看过的列表：用户看到列表之后、点确认之前清单变了，哈希对不上，返回 409，不写入、不记审计，页面提示刷新后重新确认。endpoint 的确认同理（`EndpointOut.digest`）
 - 列表的哈希（`network_digest`，排序后计算，顺序不同不算变化）变了需要重新确认，页面列出新增和去掉的地址，重新确认之前插件不能联网。插件升版本、改 endpoints 不影响 network 的确认
 - 用户可以撤销确认（`DELETE /api/plugins/{id}/network`），撤销后插件不能联网
 - 运行时，netguard 按**实际解析出的 IP** 检查：`network` 里的主机名解析到本机或私有网段（哪怕只有一个地址）就拦截，防止公网域名指向内网
@@ -92,7 +93,7 @@ scope 规则（`duohelm_sdk.endpoints.parse_address`）：
 
 平台的流程（`duohelm.endpoints`、`duohelm.api.plugins`、`duohelm.isolation`）：
 
-- 用户在 Web 的插件页展开插件，点“设置”填写地址，勾选“我确认：插件 X 将可以连接 Y”后才保存（API：`PUT /api/plugins/{id}/endpoints/{endpoint_id}`，`confirm` 必须为 true；scope 为 internet 时还要 `confirm_internet`）。“恢复默认”删除用户的地址（`DELETE`）
+- 用户在 Web 的插件页展开插件，点“设置”填写地址，勾选“我确认：插件 X 将可以连接 Y”后才保存（API：`PUT /api/plugins/{id}/endpoints/{endpoint_id}`，`confirm` 必须为 true；scope 为 internet 时还要 `confirm_internet`；`digest` 必须是页面上显示的 `EndpointOut.digest`，对不上返回 409，不写入、不记审计）。“恢复默认”删除用户的地址（`DELETE`）
 - 地址保存在 `DUOHELM_HOME/plugin-config.db`（表 `plugin_endpoints`），不进任何仓库
 - 地址是否符合 scope 由平台校验两次，用的都是 `duohelm_sdk.parse_address`：
   - **保存时**：`EndpointStore.confirm`，不合格返回 422

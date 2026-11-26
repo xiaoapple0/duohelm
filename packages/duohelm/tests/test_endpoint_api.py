@@ -256,6 +256,16 @@ def test_network_approve_requires_digest(net_client: TestClient) -> None:
     assert r.status_code == 422
 
 
+def test_endpoint_confirm_requires_digest(client: TestClient) -> None:
+    r = client.put(
+        "/api/plugins/xt/endpoints/miniqmt",
+        json={"address": "192.168.31.5:58610", "confirm": True},
+    )
+    assert r.status_code == 422
+    (ep,) = client.get("/api/plugins/xt/endpoints").json()
+    assert ep["state"] == "default"
+
+
 def test_endpoint_confirm_with_stale_digest_is_rejected(client: TestClient, tmp_path: Path) -> None:
     seen = _ep_digest(client)
     _rewrite(tmp_path, manifest(description="MiniQMT（改过）"))

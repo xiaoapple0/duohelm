@@ -47,6 +47,21 @@ class DataState:
     has_bars: bool
     """快照里有日线。没有时必须先手动做一次全量同步。"""
 
+    @property
+    def can_sync(self) -> bool:
+        """能做增量同步：快照里有日线，也有 CN 日历（start 要从日历的最新日期算）。"""
+        return self.has_bars and bool(self.calendar)
+
+
+@dataclass(frozen=True)
+class ScheduleStatus:
+    needs_full_sync: bool | None
+    """已启用且快照不能增量同步时为 True；读快照失败时为 None（未知）。"""
+    next_run_at: datetime | None
+    """读快照失败时为 None（未知），不降级为只按周末判断。"""
+    state_error: str | None
+    """读当前快照失败的说明；成功时为 None。"""
+
 
 StateReader = Callable[[], DataState]
 
@@ -151,8 +166,9 @@ class ScheduleStore:
     ) -> ScheduleConfig:
         """只改传入的字段，其余保持用户已设的值。
 
-        结果是启用状态、且当天已经过了触发时间时，把当天记为已处理：启用或改时间不会
-        立即补跑，从下一个交易日开始触发。
+        只有“从未启用变为启用”或“触发时间改变”，并且结果是启用状态、当天已经过了触发时间
+        时，才把当天记为已处理：启用或改时间不会立即补跑，从下一个交易日开始触发。只改
+        plugin_id 或空的 PATCH 不动 last_trigger_date。
         """
         current = now.astimezone(SHANGHAI)
         with self._connect() as conn:
@@ -168,7 +184,9 @@ class ScheduleStore:
                 check_run_time(new.run_time)
                 if new.enabled and not new.plugin_id:
                     raise ScheduleError("启用定时同步需要指定行情源插件 id（plugin_id）")
-                if new.enabled and current.time() >= new.run_time:
+                started = new.enabled and not old.enabled
+                retimed = new.run_time != old.run_time
+                if new.enabled and (started or retimed) and current.time() >= new.run_time:
                     new = ScheduleConfig(new.enabled, new.plugin_id, new.run_time, current.date())
                 self._write(conn, new)
             except BaseException:
@@ -207,7 +225,8 @@ def read_data_state(data: DataStore) -> DataState:
         if head is None:
             return DataState(None, False)
         has_bars = bool(data.manifest(head).datasets.get("bars_1d"))
-        df = data.read("calendar")
+        # 日线判断和日历必须来自同一个快照
+        df = data.read("calendar", snapshot=head)
         days = df.filter(df["market"] == MARKET)["date"].to_list()
     except Exception:
         # 读不到是“不知道”，不是“不是交易日”，也不是“没有日线”：不触发，等下个周期。
@@ -231,16 +250,17 @@ class Scheduler:
         self._state = state
         self._now = now
 
-    def state(self) -> DataState:
-        try:
-            return self._state()
-        except Exception:
-            return DataState(None, False)
-
-    def needs_full_sync(self) -> bool:
-        """已启用，但快照里没有日线：定时同步不会触发。"""
+    def status(self) -> ScheduleStatus:
+        """给 API 用。读当前快照失败是“未知”：needs_full_sync 和 next_run_at 都是 None。"""
         cfg = self._schedules.get()
-        return cfg.enabled and not self.state().has_bars
+        if not cfg.enabled or not cfg.plugin_id:
+            return ScheduleStatus(False, None, None)
+        try:
+            state = self._state()
+        except Exception as exc:
+            logger.warning("读取当前快照失败", exc_info=True)
+            return ScheduleStatus(None, None, f"{type(exc).__name__}: {exc}")
+        return ScheduleStatus(not state.can_sync, self._next_run_at(cfg, state), None)
 
     def now(self) -> datetime:
         return self._now().astimezone(SHANGHAI)
@@ -267,7 +287,7 @@ class Scheduler:
                 today,
                 f"{cfg.run_time:%H:%M}",
             )
-        if not state.has_bars or not state.calendar:
+        if not state.can_sync or not state.calendar:
             logger.warning("当前快照没有日线，不自动触发定时同步：需要先手动做一次全量同步")
             self._schedules.mark_triggered(today)
             return None
@@ -291,18 +311,14 @@ class Scheduler:
         logger.info("定时同步：已提交任务 %s（%s，start=%s）", task.id, cfg.plugin_id, start)
         return task.id
 
-    def next_run_at(self) -> datetime | None:
-        """下次触发时间（北京时间）。未启用时为 None。日历没覆盖的未来日子只能按周末判断。"""
-        cfg = self._schedules.get()
-        if not cfg.enabled or not cfg.plugin_id:
-            return None
+    def _next_run_at(self, cfg: ScheduleConfig, state: DataState) -> datetime | None:
+        """下次触发时间（北京时间）。日历没覆盖的未来日子只能按周末判断。"""
         current = self._now().astimezone(SHANGHAI)
-        calendar = self.state().calendar
         for offset in range(LOOKAHEAD_DAYS + 1):
             day = current.date() + timedelta(days=offset)
             if day == cfg.last_trigger_date:
                 continue
-            if is_trading_day(day, calendar):
+            if is_trading_day(day, state.calendar):
                 return datetime.combine(day, cfg.run_time, tzinfo=SHANGHAI)
         return None
 

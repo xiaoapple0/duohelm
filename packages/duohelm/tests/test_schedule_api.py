@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -55,6 +56,7 @@ def test_default_is_disabled(tmp_path: Path) -> None:
         "last_trigger_date": None,
         "plugin_warning": None,
         "needs_full_sync": False,
+        "state_error": None,
         "next_run_at": None,
     }
 
@@ -118,3 +120,15 @@ def test_needs_full_sync_when_no_snapshot(tmp_path: Path) -> None:
     client = make(tmp_path, datetime(2024, 1, 2, 10, 0, tzinfo=SH))
     body = client.patch(URL, json={"enabled": True, "plugin_id": "xtdata"}).json()
     assert body["needs_full_sync"] is True
+
+
+def test_deleted_plugin_gets_warning(tmp_path: Path) -> None:
+    client = make(tmp_path, datetime(2024, 1, 2, 10, 0, tzinfo=SH))
+    assert (
+        client.patch(URL, json={"enabled": True, "plugin_id": "xtdata"}).json()["plugin_warning"]
+        is None
+    )
+    shutil.rmtree(tmp_path / "plugins" / "xtdata")
+    body = client.get(URL).json()
+    assert body["enabled"] is True
+    assert "xtdata" in body["plugin_warning"] and "找不到" in body["plugin_warning"]

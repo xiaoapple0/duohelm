@@ -11,9 +11,12 @@ import sqlite3
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 from duohelm.settings import Settings
+from duohelm.storage import DataStore
+from duohelm.storage.datasets import CALENDAR_SCHEMA
 from duohelm.tasks import TaskStore, TaskTypeRegistry
 from duohelm.tasks import store as store_module
 from duohelm.tasks.builtin import builtin_task_types
@@ -26,7 +29,9 @@ from duohelm.tasks.schedule import (
     check_run_time,
     is_trading_day,
     parse_run_time,
+    read_data_state,
 )
+from duohelm_sdk.schema import BARS_SCHEMA
 
 SH = timezone(timedelta(hours=8))
 NY = timezone(timedelta(hours=-5))  # 本机时区为 UTC-5（美东标准时间）
@@ -93,7 +98,7 @@ def test_disabled_by_default(env: Env) -> None:
     env.now.at = bj("2024-01-02", "18:00")
     assert env.scheduler.tick() is None
     assert env.sync_tasks() == []
-    assert env.scheduler.next_run_at() is None
+    assert env.scheduler.status().next_run_at is None
     cfg = env.schedules.get()
     assert (cfg.enabled, cfg.plugin_id, cfg.run_time) == (False, None, time(16, 0))
 
@@ -159,14 +164,14 @@ def test_no_bars_does_not_trigger_and_asks_for_full_sync(
 ) -> None:
     env.has_bars = False  # 快照里没有日线（或还没有快照）
     env.enable()
-    assert env.scheduler.needs_full_sync()
+    assert env.scheduler.status().needs_full_sync is True
     env.now.at = bj("2024-01-02", "16:00")
     with caplog.at_level(logging.WARNING, logger="duohelm.tasks.schedule"):
         assert env.scheduler.tick() is None
     assert "全量同步" in caplog.text
     assert env.sync_tasks() == []
     env.has_bars = True
-    assert not env.scheduler.needs_full_sync()
+    assert env.scheduler.status().needs_full_sync is False
 
 
 def test_start_follows_latest_snapshot_date_after_long_outage(tmp_path: Path) -> None:
@@ -305,11 +310,11 @@ def test_next_run_at_skips_weekend_and_holiday(tmp_path: Path) -> None:
     calendar = trading_days(date(2024, 1, 1), date(2024, 2, 14), frozenset({holiday}))
     env = Env(tmp_path, bj("2024-02-09", "10:00"), calendar)  # 周五
     env.enable()
-    assert env.scheduler.next_run_at() == bj("2024-02-09", "16:00")
+    assert env.scheduler.status().next_run_at == bj("2024-02-09", "16:00")
     env.now.at = bj("2024-02-09", "17:00")
     env.schedules.mark_triggered(date(2024, 2, 9))
     # 周六、周日不触发；周一是日历里的节假日；下一个是周二
-    assert env.scheduler.next_run_at() == bj("2024-02-13", "16:00")
+    assert env.scheduler.status().next_run_at == bj("2024-02-13", "16:00")
 
 
 def test_is_trading_day() -> None:
@@ -342,3 +347,126 @@ def test_migration_from_version_1_keeps_tasks(tmp_path: Path) -> None:
     conn = sqlite3.connect(db)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == store_module.SCHEMA_VERSION
     conn.close()
+
+
+# ---- 读快照失败是“未知” ----
+
+
+def test_state_read_failure_is_unknown_and_retried(
+    env: Env, caplog: pytest.LogCaptureFixture
+) -> None:
+    env.enable()
+    broken = {"on": True}
+
+    def reader() -> DataState:
+        if broken["on"]:
+            raise RuntimeError("清单损坏")
+        return DataState(env.calendar, True)
+
+    scheduler = Scheduler(env.schedules, env.tasks, env.types, reader, env.now)
+    env.now.at = bj("2024-01-02", "16:00")
+    with pytest.raises(RuntimeError):
+        scheduler.tick()  # run_forever 会捕获并在下个周期重试
+    assert env.sync_tasks() == []
+    assert env.schedules.get().last_trigger_date != date(2024, 1, 2)  # 没有记为已处理
+
+    status = scheduler.status()  # 给 API 的状态：未知，不是“需要全量同步”，下次触发时间也未知
+    assert status.needs_full_sync is None
+    assert status.next_run_at is None
+    assert status.state_error is not None and "清单损坏" in status.state_error
+
+    broken["on"] = False
+    env.now.at = bj("2024-01-02", "16:00") + timedelta(seconds=30)
+    assert scheduler.tick() is not None  # 下个周期恢复后照常触发
+    assert scheduler.status().state_error is None
+
+
+def test_needs_full_sync_also_when_calendar_missing(env: Env) -> None:
+    # tick 要求日线和日历都有；needs_full_sync 用同一个判断
+    env.calendar = None
+    env.enable()
+    assert env.scheduler.status().needs_full_sync is True
+    env.now.at = bj("2024-01-02", "16:00")
+    assert env.scheduler.tick() is None
+    assert env.sync_tasks() == []
+
+
+# ---- 用真实 DataStore 快照读状态 ----
+
+
+def write_snapshot(data: DataStore, *, bars: bool = True) -> None:
+    with data.transaction() as tx:
+        if bars:
+            tx.write(
+                "bars_1d",
+                pl.DataFrame(
+                    [(date(2024, 1, 3), "600000.SH", 10.0, 11.0, 9.0, 10.5, 1000.0, 10500.0)],
+                    schema=BARS_SCHEMA,
+                    orient="row",
+                ),
+            )
+        tx.write(
+            "calendar",
+            pl.DataFrame(
+                [
+                    ("CN", date(2024, 1, 2)),
+                    ("CN", date(2024, 1, 3)),
+                    ("HK", date(2024, 1, 4)),  # 别的市场的日历不能算进 CN
+                ],
+                schema=CALENDAR_SCHEMA,
+                orient="row",
+            ),
+        )
+        tx.commit()
+
+
+def test_read_data_state_from_real_snapshot(tmp_path: Path) -> None:
+    data = DataStore(tmp_path / "data")
+    assert read_data_state(data) == DataState(None, False)  # 还没有快照
+    write_snapshot(data)
+    state = read_data_state(data)
+    assert state.has_bars
+    assert state.calendar == frozenset({date(2024, 1, 2), date(2024, 1, 3)})
+    assert state.can_sync
+
+
+def test_read_data_state_without_bars(tmp_path: Path) -> None:
+    data = DataStore(tmp_path / "data")
+    write_snapshot(data, bars=False)
+    state = read_data_state(data)
+    assert not state.has_bars
+    assert not state.can_sync
+
+
+def test_incremental_start_follows_real_snapshot_end_to_end(tmp_path: Path) -> None:
+    data = DataStore(tmp_path / "data")
+    write_snapshot(data)
+    env = Env(tmp_path, bj("2024-01-10", "10:00"), None)
+    env.scheduler = Scheduler(
+        env.schedules, env.tasks, env.types, lambda: read_data_state(data), env.now
+    )
+    env.enable()
+    env.now.at = bj("2024-01-10", "16:00")
+    assert env.scheduler.tick() is not None
+    [task] = env.sync_tasks()
+    # CN 日历最新日期 2024-01-03 往前 7 天；HK 的 2024-01-04 不能影响它
+    assert json.loads(task.params)["start"] == "2023-12-27"
+
+
+# ---- 只在启用或改时间时把当天记为已处理 ----
+
+
+def test_update_marks_today_only_when_enabling_or_retiming(env: Env) -> None:
+    env.now.at = bj("2024-01-02", "18:00")
+    env.schedules.update(now=env.now(), plugin_id="xtdata")  # 没启用：不标记
+    assert env.schedules.get().last_trigger_date is None
+    env.schedules.update(now=env.now(), enabled=True)  # 启用：标记
+    assert env.schedules.get().last_trigger_date == date(2024, 1, 2)
+
+    env.schedules.mark_triggered(date(2024, 1, 1))  # 回到“今天还没处理”
+    env.schedules.update(now=env.now())  # 空 PATCH：不动
+    assert env.schedules.get().last_trigger_date == date(2024, 1, 1)
+    env.schedules.update(now=env.now(), plugin_id="eltdx")  # 只改插件：不动
+    assert env.schedules.get().last_trigger_date == date(2024, 1, 1)
+    env.schedules.update(now=env.now(), run_time=time(17, 0))  # 改时间且已过：标记
+    assert env.schedules.get().last_trigger_date == date(2024, 1, 2)

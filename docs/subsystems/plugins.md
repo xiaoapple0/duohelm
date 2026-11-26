@@ -102,7 +102,7 @@ scope 规则（`duohelm_sdk.endpoints.parse_address`）：
 - 平台代码运行插件时用 `duohelm.isolation.session_for(entry, store)`，它从 `EndpointStore` 取出确认过的地址传给 `PluginSession`。直接构造 `PluginSession` 而不传 `endpoints` 时，插件只拿到 `default`，而且连不上。**目前还没有平台代码运行插件**，同步任务（M1）是第一个调用方，接入时必须用 `session_for`（#24）
 - 需要重新确认的情况：清单里 `[[permissions.endpoints]]` 这一节变了。按这一节规范化 JSON 的 sha256 判断（`endpoints_digest`），插件升版本、改插件名称或说明、改 `network` 等清单其他部分的改动都不算；endpoint 自己的 `description`、`default`、`scope` 变了算。需要重新确认时，页面显示“需要重新确认，不能连接”，插件拿到的是 `default`，但已保存的地址和 `default` 在用户重新确认之前都不放行
 - endpoint 的确认、清除和 network 的确认、撤销，都记进审计表 `permission_audit`（对象、旧值、新值、当时的哈希、时间），只在本机数据库里。普通日志、质量报告和任务日志里不写具体地址
-- 子进程收到 `start` 后、导入插件代码之前，按“**用户确认过的** `network` + 传给插件的 endpoint 地址”设置网络白名单（`session_for` 从 `EndpointStore.network_for` 取 network，没确认时为空；直接构造 `PluginSession` 不传 `network` 时也为空；传入的 network 必须是清单的子集），并设置 `duohelm_sdk.endpoint()` 能取到的地址。白名单逐个精确匹配主机和端口；白名单里的主机名必须解析到公网 IP，解析出来的公网 IP 按主机名那一项的端口规则放行。原生扩展（如 xtquant）和插件启动的子进程不经过这层拦截，靠的是平台只把确认过的地址传给插件（威胁模型见下）
+- 子进程收到 `start` 后、导入插件代码之前，按“**用户确认过的** `network` + 传给插件的 endpoint 地址”设置网络白名单（`session_for` 从 `EndpointStore.network_for` 取 network，没确认时为空；直接构造 `PluginSession` 不传 `network` 时也为空；传入的 network 必须是清单的子集），并设置 `duohelm_sdk.endpoint()` 能取到的地址。白名单逐个精确匹配主机和端口；白名单里的主机名必须解析到公网 IP，解析出来的公网 IP 按主机名那一项的端口规则放行。原生扩展（如 xtquant）和插件启动的子进程不经过这层拦截。**已知缺口（#27）**：没确认的 endpoint，平台仍把清单的 `default` 传给插件（`endpoint()` 返回它），只是不进白名单；原生扩展拿到 default 后可以直接连上，所以对原生代码来说“没确认就不放行”目前不成立（威胁模型见下）
 - 实现了 `check_connection` 的插件，平台可以在隔离进程里调用它（同步任务里接入）
 
 ## 加载流程

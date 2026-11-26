@@ -170,3 +170,7 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 - 按新定义返回 `adj_factors()`，推荐直接使用 `factors_from_events()`
 - 清单的 `sdk` 改为 `">=0.2,<0.3"`
 - 目前还没有官方参考插件需要同步更新
+
+**SDK 0.2 口径说明（M1，不改格式和版本号）**：
+
+- `SECURITIES_SCHEMA` 的 `delist_date` 明确为**摘牌日之前的最后一个交易所交易日**（按交易日历），不是这只证券最后一根 K 线的日期。原文“退市日（最后一个交易日）”对退市前停牌的证券有两种读法，这里定为前一种。数据源只给出最后一根 K 线、取不到摘牌日的插件，要在 README 里写明自己的口径，平台在质量报告里标出两个数据源的差异

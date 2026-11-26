@@ -53,7 +53,9 @@ SECURITIES_SCHEMA: dict[str, pl.DataType] = {
 - ``exchange``：``SH`` / ``SZ`` / ``BJ``，必须与 ``symbol`` 的后缀一致
 - ``kind``：``stock`` / ``index``
 - ``list_date``：上市日（数据源能取到的第一根 K 线的日期也可以），未知时为 null
-- ``delist_date``：退市日（最后一个交易日），仍在市时为 null
+- ``delist_date``：退市日，定义为**摘牌日之前的最后一个交易所交易日**（按交易日历，不是
+  这只证券最后一根 K 线的日期），仍在市时为 null。退市前停牌的证券（如换股吸收合并），
+  退市日会晚于最后一根 K 线；两者之间的日子停牌、不能成交
 """
 
 EXCHANGES = ("SH", "SZ", "BJ")

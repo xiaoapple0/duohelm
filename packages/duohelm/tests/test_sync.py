@@ -790,7 +790,8 @@ def test_empty_indexes_param_skips_members(settings: Settings) -> None:
 
 @pytest.mark.parametrize("behavior", [{}, {"bad_index_format": True}])
 def test_index_failure_is_unknown_not_empty(settings: Settings, behavior: dict[str, Any]) -> None:
-    """插件没实现（unsupported）、报错、格式不对：不写成分，不写空名单，同步照常成功。"""
+    """index_constituents 抛 NotImplementedError（插件错误）、返回格式不对：不写成分，不写空名单，
+    同步照常成功。方法根本不存在（unsupported）的情形见 test_snapshots.py 的假会话测试。"""
     plugin = install(settings)
     behave(plugin, names={"000001.SZ": "ST平安"}, **behavior)
     confirm(settings)
@@ -829,7 +830,7 @@ def test_backfill_does_not_touch_existing_snapshots(settings: Settings) -> None:
     assert snapshot_rows(settings, "st_daily") == before
 
 
-def test_snapshot_date_is_last_trading_day_on_weekend(settings: Settings) -> None:
+def test_weekend_run_writes_no_snapshot_and_keeps_friday(settings: Settings) -> None:
     """北京时间 1 月 6 日（星期六）16:00：最近已收盘的日子是周六，不是交易日：不写快照，
     也不动周五已有的快照。"""
     plugin = install(settings)
@@ -857,8 +858,9 @@ def test_snapshot_date_uses_shanghai_time_not_local_time(settings: Settings) -> 
 
 
 def test_pre_open_run_does_not_overwrite_previous_day(settings: Settings) -> None:
-    """周五 16:00 同步一次；周一 09:00（最近已收盘的是周日）、周五 09:00 之类的盘前运行，
-    名称已经变了：周五的行不变，周一没写。"""
+    """1 月 5 日（周五）16:00 同步一次；1 月 8 日（周一）09:00（最近已收盘的是周日）、
+    1 月 9 日（周二）09:00（最近已收盘的是周一，但名单已是周二的）盘前运行，名称已经变了：
+    周五的行不变，周一周二没写。"""
     plugin = install(settings)
     behave(plugin, names={"000001.SZ": "ST平安"}, index_members=MEMBERS)
     confirm(settings)
@@ -992,3 +994,38 @@ def test_params_indexes_validation() -> None:
     assert SyncParams(plugin_id="p").indexes is None
     with pytest.raises(pydantic.ValidationError):
         SyncParams(plugin_id="p", indexes=[""])
+
+
+BOTH = {**MEMBERS, "000905.SH": [("600000.SH", None, None), ("000001.SZ", None, None)]}
+
+
+def test_failed_index_keeps_its_existing_rows(settings: Settings) -> None:
+    """同一天重复同步，某个指数这次读取失败：它已有的行不变（未知不是空，也不是作废）。"""
+    plugin = install(settings)
+    behave(plugin, index_members=BOTH)
+    confirm(settings)
+    result_of(*run_at(settings, CLOSE_DAY, indexes=INDEXES))
+    before = snapshot_rows(settings, "index_members_daily")
+    assert {r[1] for r in before} == set(INDEXES)
+
+    behave(plugin, index_members=BOTH, index_raise=["000300.SH"])
+    result = result_of(*run_at(settings, CLOSE_DAY, indexes=INDEXES))
+    assert list(result.index_snapshot_failed) == ["000300.SH"]
+    assert snapshot_rows(settings, "index_members_daily") == before
+
+
+def test_index_not_in_this_run_is_left_alone(settings: Settings) -> None:
+    """这次 indexes 里没有的指数，当天已有的行不动；在列表里的照常以这次为准。"""
+    plugin = install(settings)
+    behave(plugin, index_members=BOTH)
+    confirm(settings)
+    result_of(*run_at(settings, CLOSE_DAY, indexes=INDEXES))
+    others = [r for r in snapshot_rows(settings, "index_members_daily") if r[1] == "000905.SH"]
+    assert others
+
+    changed = {"000300.SH": [("600000.SH", None, None)], "000905.SH": [("600000.SH", None, None)]}
+    behave(plugin, index_members=changed)
+    result_of(*run_at(settings, CLOSE_DAY, indexes=["000300.SH"]))
+    rows = snapshot_rows(settings, "index_members_daily")
+    assert [r for r in rows if r[1] == "000905.SH"] == others
+    assert [r[2] for r in rows if r[1] == "000300.SH"] == ["600000.SH"]

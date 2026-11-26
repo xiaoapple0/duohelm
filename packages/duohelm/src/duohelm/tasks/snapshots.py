@@ -10,8 +10,6 @@ xtdata 普通版和 eltdx 都拿不到历史 ST 状态和历史指数成分，�
 
 from __future__ import annotations
 
-import re
-import unicodedata
 from datetime import date
 
 import polars as pl
@@ -28,8 +26,8 @@ DEFAULT_INDEXES: tuple[str, ...] = (
 )
 """默认保存成分快照的指数。"""
 
-_ST_PREFIX = re.compile(r"^(?:\*|S\*?)?ST(?![A-Z])")
-"""ST、*ST、SST、S*ST。后面跟英文字母的（如 STAR）不算。"""
+_ST_PREFIX = r"^(?:\*|S\*?)?ST(?:[^A-Z]|$)"
+"""ST、*ST、SST、S*ST。后面跟英文字母的（如 STAR）不算（polars 的正则不支持前瞻）。"""
 _RECOVERABLE_REASONS = frozenset({"unsupported", "plugin_error"})
 """取成分时，这两种失败只影响这个指数；超时、崩溃、取消等照常让任务失败或重试。"""
 
@@ -38,11 +36,16 @@ class SnapshotUnavailableError(Exception):
     """这一项快照取不到。是“未知”，不写任何行；原因进任务结果，不让整个同步失败。"""
 
 
+def is_st_expr(name: pl.Expr) -> pl.Expr:
+    """按名称前缀判定 ST 的表达式：NFKC 归一化（全角的ＳＴ、＊换成半角）、去掉所有空白、
+    转大写后，以 ST、*ST、SST、S*ST 开头。"""
+    folded = name.str.normalize("NFKC").str.replace_all(r"\s", "").str.to_uppercase()
+    return folded.str.contains(_ST_PREFIX)
+
+
 def is_st_name(name: str) -> bool:
-    """按名称前缀判定 ST：去掉所有空白（含全角空格）、转大写后以 ST、*ST、SST、S*ST 开头。"""
-    # NFKC 把全角的ＳＴ、＊换成半角
-    folded = unicodedata.normalize("NFKC", name)
-    return _ST_PREFIX.match("".join(folded.split()).upper()) is not None
+    """:func:`is_st_expr` 对单个名称的结果。"""
+    return bool(pl.select(is_st_expr(pl.lit(name))).item())
 
 
 def st_snapshot(securities: pl.DataFrame, day: date) -> tuple[pl.DataFrame, int]:
@@ -61,7 +64,7 @@ def st_snapshot(securities: pl.DataFrame, day: date) -> tuple[pl.DataFrame, int]
     unknown = listed.filter(~has_name)
     if listed.height and not named.height:
         raise SnapshotUnavailableError(f"{listed.height} 只在市股票的名称全部为空，无法判定 ST")
-    st = named.filter(pl.col("name").map_elements(is_st_name, return_dtype=pl.Boolean())).select(
+    st = named.filter(is_st_expr(pl.col("name"))).select(
         pl.lit(day).alias("date"), "symbol", "name", pl.lit("st").alias("status")
     )
     unknown_rows = unknown.select(
@@ -138,6 +141,7 @@ __all__ = [
     "DEFAULT_INDEXES",
     "SnapshotUnavailableError",
     "fetch_index_members",
+    "is_st_expr",
     "is_st_name",
     "merge_st_rows",
     "st_snapshot",

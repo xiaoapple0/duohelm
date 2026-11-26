@@ -38,6 +38,8 @@ SCAN_RANGES: tuple[tuple[str, int, int], ...] = (
 """
 SCAN_BATCH = 100
 """每次 lookup_securities 查询多少个代码。"""
+MIN_LISTED_RATIO = 0.5
+"""代码表的证券数少于扫到过的代码数的这个比例时，认为代码表不完整，任务失败。"""
 
 
 class ScanError(Exception):
@@ -73,6 +75,14 @@ def discover_securities(
     source = session.entry.id
     listed = _checked(session.call("securities", include_delisted=False), "securities")
     listed_symbols = set(listed.get_column("symbol").to_list())
+    # 代码表为空或比以前少了一大截，多半是数据源一时出错。这时往下走，在市证券会被
+    # 当成“不在代码表里”去查询，结果不可信：“不知道”不能当成“没有”
+    known = len(catalog.found_symbols(source))
+    if not listed_symbols or len(listed_symbols) < MIN_LISTED_RATIO * known:
+        raise ScanError(
+            f"代码表只有 {len(listed_symbols)} 只证券，而这个数据源扫到过 {known} 个代码，"
+            "代码表可能不完整，不做扫描"
+        )
     catalog.record_scan(source, [(s, True) for s in sorted(listed_symbols)])
 
     pending = [s for s in catalog.unscanned(source, scan_symbols()) if s not in listed_symbols]
@@ -82,7 +92,8 @@ def discover_securities(
         ctx.check_cancelled()
         progress(0.9 * i * SCAN_BATCH / max(len(pending), 1), f"扫描代码：{i * SCAN_BATCH}")
         rows = _lookup(session, batch)
-        catalog.record_scan(source, [(s, s in set(rows.get_column("symbol"))) for s in batch])
+        hit = set(rows.get_column("symbol").to_list())
+        catalog.record_scan(source, [(s, s in hit) for s in batch])
         found.append(rows)
     found_now = {s for df in found for s in df.get_column("symbol").to_list()}
 
@@ -135,6 +146,7 @@ def _batches(symbols: Sequence[str]) -> list[Sequence[str]]:
 
 
 __all__ = [
+    "MIN_LISTED_RATIO",
     "SCAN_BATCH",
     "SCAN_RANGES",
     "ScanError",

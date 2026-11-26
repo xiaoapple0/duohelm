@@ -93,7 +93,7 @@ class Plain:
         record(f"securities include_delisted={include_delisted}")
         rows = all_securities()
         if not include_delisted:
-            rows = [r for r in rows if r[5] is None]
+            rows = [r for r in rows if r[5] is None][: B.get("listed_limit")]
         return pl.DataFrame(rows, schema=SECURITIES_SCHEMA, orient="row")
 
     def lookup_securities(self, symbols):
@@ -400,7 +400,8 @@ def test_scan_finds_delisted_securities(settings: Settings, small_scan: None) ->
     bars = data.read("bars_1d")
     assert bars.filter(pl.col("symbol") == "600005.SH").height == 2
     summary = data.catalog.scan_summary("fake-src")
-    assert summary["scanned"] >= 13
+    # 13 个区间代码，加上代码表里不在区间内的 000001.SH、830000.NQ
+    assert summary == {"scanned": 15, "found": 6}
     assert {"600001.SH", "600005.SH"} <= set(data.catalog.found_symbols("fake-src"))
 
 
@@ -466,6 +467,30 @@ def test_failed_scan_resumes_where_it_stopped(settings: Settings, small_scan: No
     second = {s for batch in scan_batches for s in batch.split(",")}
     assert len(second) == 6 and not second & set(done)
     assert data.head() == result.snapshot_id
+
+
+@pytest.mark.parametrize("limit", [0, 1])
+def test_incomplete_listing_fails(settings: Settings, small_scan: None, limit: int) -> None:
+    """代码表为空或少了一大截：不知道是不是数据源出错，不扫描、不写快照。"""
+    plugin = install(settings, lists_delisted=False)
+    confirm(settings)
+    store, first = run(settings)
+    head = result_of(store, first).snapshot_id
+    behave(plugin, lists_delisted=False, listed_limit=limit)
+    store, task_id = run(settings)
+    assert "代码表可能不完整" in failed(store, task_id)
+    assert lookups(plugin) == []
+    data = DataStore(settings.data_dir)
+    assert data.head() == head
+    assert len(data.catalog.found_symbols("fake-src")) == 6
+
+
+def test_empty_listing_on_first_sync_fails(settings: Settings, small_scan: None) -> None:
+    install(settings, lists_delisted=False, listed_limit=0)
+    confirm(settings)
+    store, task_id = run(settings)
+    assert "代码表可能不完整" in failed(store, task_id)
+    assert DataStore(settings.data_dir).catalog.scan_summary("fake-src")["scanned"] == 0
 
 
 def test_lookup_returning_unrequested_code_fails(settings: Settings, small_scan: None) -> None:

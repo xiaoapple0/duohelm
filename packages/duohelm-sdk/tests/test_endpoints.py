@@ -59,6 +59,11 @@ def test_accepts(text: str, scope: str, expected: Address) -> None:
         ("100.64.0.1:80", "lan", "私有网段"),
         ("[fe80::1]:80", "lan", "私有网段"),
         ("[2001:db8::1]:80", "lan", "私有网段"),
+        # IPv4 映射的 IPv6 地址：lan 和 loopback 都不接受（只认 IPv4 写法和 ::1）
+        ("[::ffff:192.168.1.1]:58610", "lan", "私有网段"),
+        ("[::ffff:127.0.0.1]:58610", "lan", "私有网段"),
+        ("[::ffff:192.168.1.1]:58610", "loopback", "127.0.0.1 和 ::1"),
+        ("[::ffff:127.0.0.1]:58610", "loopback", "127.0.0.1 和 ::1"),
         # 所有 scope 都不接受的
         ("0.0.0.0:80", "internet", "不是可连接的地址"),
         ("224.0.0.1:80", "internet", "不是可连接的地址"),
@@ -129,15 +134,46 @@ def test_manifest_without_endpoints_still_parses() -> None:
     assert parse_manifest(head).permissions.endpoints == ()
 
 
-def test_manifest_default_must_fit_scope() -> None:
-    assert "不符合 scope" in _error(
-        MANIFEST.replace('default = "127.0.0.1:58610"', 'default = "miniqmt.lan:58610"')
+def _with_endpoint(default: str, scope: str) -> str:
+    return MANIFEST.replace('default = "127.0.0.1:58610"', f'default = "{default}"').replace(
+        'scope = "lan"', f'scope = "{scope}"'
     )
-    assert "不符合 scope" in _error(
-        MANIFEST.replace('scope = "lan"', 'scope = "loopback"').replace(
-            '"127.0.0.1:58610"\nscope', '"192.168.1.2:58610"\nscope'
-        )
-    )
+
+
+@pytest.mark.parametrize(
+    ("default", "scope"),
+    [
+        ("8.8.8.8:58610", "loopback"),  # 声明 loopback，default 却是公网地址
+        ("example.com:58610", "loopback"),
+        ("192.168.1.2:58610", "loopback"),
+        ("8.8.8.8:58610", "lan"),
+        ("miniqmt.lan:58610", "lan"),
+        ("[::ffff:192.168.1.1]:58610", "lan"),
+        ("0.0.0.0:58610", "internet"),
+        ("127.0.0.1", "loopback"),  # 没有端口
+    ],
+)
+def test_manifest_default_must_fit_scope(default: str, scope: str) -> None:
+    """default 在解析清单时就按它声明的 scope 校验，不合格是清单错误。
+
+    不在平台里运行时 endpoint() 不知道 scope，所以不能指望那里发现问题。
+    """
+    message = _error(_with_endpoint(default, scope))
+    assert "不符合 scope" in message and "miniqmt" in message
+
+
+@pytest.mark.parametrize(
+    ("default", "scope"),
+    [
+        ("127.0.0.1:58610", "loopback"),
+        ("[::1]:58610", "loopback"),
+        ("192.168.1.2:58610", "lan"),
+        ("example.com:7709", "internet"),
+    ],
+)
+def test_manifest_default_within_scope_parses(default: str, scope: str) -> None:
+    (e,) = parse_manifest(_with_endpoint(default, scope)).permissions.endpoints
+    assert (e.default, e.scope) == (default, EndpointScope(scope))
 
 
 def test_manifest_rejects_bad_endpoint_fields() -> None:

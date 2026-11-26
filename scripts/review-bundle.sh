@@ -110,8 +110,9 @@ if [ -z "$base" ]; then
   skipped "merge-base 失败"
 elif [ "$files_ok" -ne 1 ]; then
   echo "报错：列出改动文件失败，无法判断是否改动了 .github/"
-elif all=$(git -c core.quotePath=false diff --name-only "$base...HEAD" 2>"$errfile") \
-  && printf '%s\n' "$all" | grep -q '^\.github/'; then
+elif ! all=$(git -c core.quotePath=false diff --name-only "$base...HEAD" 2>"$errfile"); then
+  echo "报错：无法判断是否改动了 .github/：$(cat "$errfile")"
+elif printf '%s\n' "$all" | grep -q '^\.github/'; then
   run gh api repos/xiaoapple0/duohelm/rules/branches/main
 else
   skipped "diff 没有改动 .github/"

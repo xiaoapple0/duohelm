@@ -122,7 +122,7 @@ def test_default_until_confirmed(store: EndpointStore) -> None:
     m = manifest()
     (view,) = store.views(m)
     assert (view.state, view.configured, view.effective) == ("default", None, "127.0.0.1:58610")
-    assert store.addresses_for(m) == {"svc": "127.0.0.1:58610"}
+    assert store.addresses_for(m) == {}  # 没确认：不放行，包括 default
 
 
 def test_confirm_saves_normalized_address(store: EndpointStore) -> None:
@@ -154,7 +154,7 @@ def test_save_rejects_address_outside_scope(store: EndpointStore, scope: str, ad
     m = manifest(scope=scope, default=default)
     with pytest.raises(EndpointConfigError):
         store.confirm(m, "svc", address, confirmed=True)
-    assert store.addresses_for(m) == {"svc": default}
+    assert store.addresses_for(m) == {}
 
 
 def test_internet_needs_extra_confirmation(store: EndpointStore) -> None:
@@ -183,7 +183,7 @@ def test_endpoints_change_requires_reconfirmation(store: EndpointStore) -> None:
     assert view.state == "needs_confirmation"
     assert view.configured == "192.168.31.5:58610"
     assert view.effective == "127.0.0.1:58610"
-    assert store.addresses_for(changed) == {"svc": "127.0.0.1:58610"}
+    assert store.addresses_for(changed) == {}  # 需要重新确认：旧地址和 default 都不放行
     store.confirm(changed, "svc", "192.168.31.5:58610", confirmed=True)
     assert store.addresses_for(changed) == {"svc": "192.168.31.5:58610"}
 
@@ -584,6 +584,23 @@ def test_confirmed_address_reaches_plugin(tmp_path: Path) -> None:
         assert s.call("compute", "endpoint", DATA).row(0)[:2] == ("192.168.31.5", 58610)
 
 
+def test_unconfirmed_default_is_not_allowed(tmp_path: Path) -> None:
+    """完整路径：没确认过的 endpoint，插件拿到 default，但这个地址不放行；确认 default 后才放行。"""
+    entry = make_entry(tmp_path / "plugins")
+    assert entry.manifest is not None
+    store = EndpointStore(tmp_path / "plugin-config.db")
+    with session_for(entry, store, limits=FAST) as s:
+        assert s.call("compute", "endpoint", DATA).row(0)[:2] == ("127.0.0.1", 58610)
+        assert s.call("compute", "allows:127.0.0.1:58610", DATA)["ok"].item() is False
+    store.confirm(entry.manifest, "svc", "127.0.0.1:58610", confirmed=True)
+    with session_for(entry, store, limits=FAST) as s:
+        assert s.call("compute", "allows:127.0.0.1:58610", DATA)["ok"].item() is True
+    # endpoints 那一节变了：需要重新确认，之前不放行
+    changed = make_entry(tmp_path / "changed", description="新说明")
+    with session_for(changed, store, limits=FAST) as s:
+        assert s.call("compute", "allows:127.0.0.1:58610", DATA)["ok"].item() is False
+
+
 def test_plugin_receives_default_without_config(tmp_path: Path) -> None:
     entry = make_entry(tmp_path)
     with PluginSession(entry, limits=FAST) as s:
@@ -632,9 +649,9 @@ def test_endpoint_address_is_allowed(tmp_path: Path, listener: tuple[int, list[s
 
 
 def test_endpoint_default_port_only(tmp_path: Path, listener: tuple[int, list[str]]) -> None:
-    """没有配置地址时，只放行 default 的端口，不放行别的端口。"""
+    """没有确认过地址时，连 default 也被拦截。"""
     port, seen = listener
-    entry = make_entry(tmp_path, scope="loopback")
+    entry = make_entry(tmp_path, scope="loopback", default=f"127.0.0.1:{port}")
     with (
         PluginSession(entry, limits=FAST) as s,
         pytest.raises(PluginRunError, match="没有网络权限"),

@@ -75,11 +75,11 @@ description = "价格和成交量排名的10日相关系数取反"
 [[permissions.endpoints]]
 id = "miniqmt"                    # 小写字母开头，只含小写字母、数字、下划线
 description = "MiniQMT 行情服务"   # 在平台的确认弹窗里给用户看
-default = "127.0.0.1:58610"       # 默认地址，必须符合 scope
+default = "127.0.0.1:58610"       # 默认地址，必须符合 scope；用户确认之前不放行
 scope = "lan"                     # 用户能填的地址范围
 ```
 
-插件代码用 `duohelm_sdk.endpoint("miniqmt", default="127.0.0.1:58610")` 取得地址（`Address(host, port)`）。在平台里运行时，返回用户确认过的地址（没有配置的用清单的 `default`），代码里的 `default` 被忽略；不在平台里运行时（测试、独立脚本），返回代码里的 `default`。
+插件代码用 `duohelm_sdk.endpoint("miniqmt", default="127.0.0.1:58610")` 取得地址（`Address(host, port)`）。在平台里运行时，返回用户确认过的地址（没有确认的返回清单的 `default`，代码里的 `default` 被忽略）；**只有用户确认过的地址放行，没确认时连清单的 `default` 也连不上**，插件可以据此提示用户去插件页确认；不在平台里运行时（测试、独立脚本），返回代码里的 `default`。
 
 scope 规则（`duohelm_sdk.endpoints.parse_address`）：
 
@@ -93,13 +93,14 @@ scope 规则（`duohelm_sdk.endpoints.parse_address`）：
 
 平台的流程（`duohelm.endpoints`、`duohelm.api.plugins`、`duohelm.isolation`）：
 
-- 用户在 Web 的插件页展开插件，点“设置”填写地址，勾选“我确认：插件 X 将可以连接 Y”后才保存（API：`PUT /api/plugins/{id}/endpoints/{endpoint_id}`，`confirm` 必须为 true；scope 为 internet 时还要 `confirm_internet`；`digest` 必须是页面上显示的 `EndpointOut.digest`，对不上返回 409，不写入、不记审计）。“恢复默认”删除用户的地址（`DELETE`）
+- **没确认过的 endpoint 一律不放行，包括清单的 `default`。** 插件页把 `default` 预先填好：scope 为 loopback、lan 时可以点“确认默认地址”一键确认；internet 范围要在弹窗里额外确认
+- 用户在 Web 的插件页展开插件，点“修改地址”填写地址，勾选“我确认：插件 X 将可以连接 Y”后才保存（API：`PUT /api/plugins/{id}/endpoints/{endpoint_id}`，`confirm` 必须为 true；scope 为 internet 时还要 `confirm_internet`；`digest` 必须是页面上显示的 `EndpointOut.digest`，对不上返回 409，不写入、不记审计）。“清除”删除用户的地址（`DELETE`），之后回到未确认，插件不能连接
 - 地址保存在 `DUOHELM_HOME/plugin-config.db`（表 `plugin_endpoints`），不进任何仓库
 - 地址是否符合 scope 由平台校验两次，用的都是 `duohelm_sdk.parse_address`：
   - **保存时**：`EndpointStore.confirm`，不合格返回 422
   - **启动插件子进程、传地址之前**：`PluginSession.start` 调用 `checked_addresses`，不合格时不启动子进程，报 `load` 错误。错误信息会进任务日志，只写 endpoint 和 scope，不写地址
-- 平台代码运行插件时用 `duohelm.isolation.session_for(entry, store)`，它从 `EndpointStore` 取出确认过的地址传给 `PluginSession`。直接构造 `PluginSession` 而不传 `endpoints` 时，插件只拿到 `default`。**目前还没有平台代码运行插件**，同步任务（M1）是第一个调用方，接入时必须用 `session_for`（#24）
-- 需要重新确认的情况：清单里 `[[permissions.endpoints]]` 这一节变了。按这一节规范化 JSON 的 sha256 判断（`endpoints_digest`），插件升版本、改插件名称或说明、改 `network` 等清单其他部分的改动都不算；endpoint 自己的 `description`、`default`、`scope` 变了算。需要重新确认时，页面显示“需要重新确认”，插件拿到的是 `default`，已保存的地址在用户重新确认之前不使用
+- 平台代码运行插件时用 `duohelm.isolation.session_for(entry, store)`，它从 `EndpointStore` 取出确认过的地址传给 `PluginSession`。直接构造 `PluginSession` 而不传 `endpoints` 时，插件只拿到 `default`，而且连不上。**目前还没有平台代码运行插件**，同步任务（M1）是第一个调用方，接入时必须用 `session_for`（#24）
+- 需要重新确认的情况：清单里 `[[permissions.endpoints]]` 这一节变了。按这一节规范化 JSON 的 sha256 判断（`endpoints_digest`），插件升版本、改插件名称或说明、改 `network` 等清单其他部分的改动都不算；endpoint 自己的 `description`、`default`、`scope` 变了算。需要重新确认时，页面显示“需要重新确认，不能连接”，插件拿到的是 `default`，但已保存的地址和 `default` 在用户重新确认之前都不放行
 - endpoint 的确认、清除和 network 的确认、撤销，都记进审计表 `permission_audit`（对象、旧值、新值、当时的哈希、时间），只在本机数据库里。普通日志、质量报告和任务日志里不写具体地址
 - 子进程收到 `start` 后、导入插件代码之前，按“**用户确认过的** `network` + 传给插件的 endpoint 地址”设置网络白名单（`session_for` 从 `EndpointStore.network_for` 取 network，没确认时为空；直接构造 `PluginSession` 不传 `network` 时也为空；传入的 network 必须是清单的子集），并设置 `duohelm_sdk.endpoint()` 能取到的地址。白名单逐个精确匹配主机和端口；白名单里的主机名必须解析到公网 IP，解析出来的公网 IP 按主机名那一项的端口规则放行。原生扩展（如 xtquant）和插件启动的子进程不经过这层拦截，靠的是平台只把确认过的地址传给插件（威胁模型见下）
 - 实现了 `check_connection` 的插件，平台可以在隔离进程里调用它（同步任务里接入）

@@ -138,7 +138,7 @@ def session_for(
     """平台运行插件的入口：带上用户在插件页确认过的连接地址。
 
     平台代码（同步任务等）应当用它，而不是直接构造 :class:`PluginSession`；直接构造时
-    不传 ``endpoints``，插件只会拿到清单的 default。
+    不传 ``endpoints``，插件只会拿到清单的 default，而且连不上。
     """
     if entry.manifest is None:
         raise PluginRunError("load", f"插件 {entry.id} 的清单无效，不能运行")
@@ -170,9 +170,10 @@ class PluginSession:
         endpoints: Mapping[str, str] | None = None,
         network: Sequence[str] = (),
     ) -> None:
-        """``endpoints``：要传给插件的连接地址（endpoint id -> ``主机:端口``），通常来自
-        :meth:`duohelm.endpoints.EndpointStore.addresses_for`；没给的用清单的 default。
-        启动子进程之前按 scope 再校验一次。
+        """``endpoints``：用户确认过的连接地址（endpoint id -> ``主机:端口``），通常来自
+        :meth:`duohelm.endpoints.EndpointStore.addresses_for`。只有这里的地址放行；没给的
+        endpoint，插件的 ``endpoint()`` 返回清单的 default，但不放行。启动子进程之前按
+        scope 再校验一次。
 
         ``network``：放行的清单 network 地址，来自
         :meth:`duohelm.endpoints.EndpointStore.network_for`（用户确认过才有）。默认为空，
@@ -245,7 +246,8 @@ class PluginSession:
             approved = checked_network(self._manifest, self._network)
         except EndpointConfigError as exc:
             raise PluginRunError("load", str(exc)) from None
-        network = [*approved, *(str(a) for a in addresses.values())]
+        # 只放行用户确认过的地址：没确认的 endpoint（用 default 的）不进白名单
+        network = [*approved, *(str(addresses[k]) for k in self._endpoint_texts)]
         workdir = Path(tempfile.mkdtemp(prefix="duohelm-plugin-"))
         self.workdir = workdir
         self._inputs = FrameStore(workdir, "in")

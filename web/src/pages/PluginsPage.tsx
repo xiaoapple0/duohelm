@@ -1,5 +1,15 @@
 import { ReloadOutlined } from "@ant-design/icons";
-import { Alert, App, Button, Card, Popconfirm, Space, Table, Tag, Typography } from "antd";
+import {
+  Alert,
+  App,
+  Button,
+  Card,
+  Popconfirm,
+  Space,
+  Table,
+  Tag,
+  Typography,
+} from "antd";
 import type { TableColumnsType } from "antd";
 import { useState } from "react";
 
@@ -30,11 +40,12 @@ const KIND: Record<PluginKind, string> = {
   broker: "交易接口",
 };
 
-const ENDPOINT_STATE: Record<EndpointState, { color: string; label: string }> = {
-  default: { color: "default", label: "默认地址" },
-  confirmed: { color: "green", label: "已确认" },
-  needs_confirmation: { color: "orange", label: "需要重新确认" },
-};
+const ENDPOINT_STATE: Record<EndpointState, { color: string; label: string }> =
+  {
+    default: { color: "orange", label: "未确认，不能连接" },
+    confirmed: { color: "green", label: "已确认" },
+    needs_confirmation: { color: "orange", label: "需要重新确认，不能连接" },
+  };
 
 const NETWORK_STATE: Record<NetworkState, { color: string; label: string }> = {
   none: { color: "default", label: "不联网" },
@@ -44,7 +55,12 @@ const NETWORK_STATE: Record<NetworkState, { color: string; label: string }> = {
 
 const columns: TableColumnsType<Plugin> = [
   { title: "ID", dataIndex: "id", key: "id" },
-  { title: "名称", dataIndex: "name", key: "name", render: (v: string | null) => v ?? "-" },
+  {
+    title: "名称",
+    dataIndex: "name",
+    key: "name",
+    render: (v: string | null) => v ?? "-",
+  },
   {
     title: "类型",
     dataIndex: "kind",
@@ -61,7 +77,9 @@ const columns: TableColumnsType<Plugin> = [
     title: "状态",
     dataIndex: "status",
     key: "status",
-    render: (v: PluginStatus) => <Tag color={STATUS[v].color}>{STATUS[v].label}</Tag>,
+    render: (v: PluginStatus) => (
+      <Tag color={STATUS[v].color}>{STATUS[v].label}</Tag>
+    ),
   },
   {
     title: "联网",
@@ -88,9 +106,9 @@ const columns: TableColumnsType<Plugin> = [
       if (endpoints.length === 0) {
         return "-";
       }
-      const pending = endpoints.filter((e) => e.state === "needs_confirmation").length;
+      const pending = endpoints.filter((e) => e.state !== "confirmed").length;
       return pending > 0 ? (
-        <Tag color="orange">{pending} 个需要重新确认</Tag>
+        <Tag color="orange">{pending} 个未确认</Tag>
       ) : (
         `${endpoints.length} 个`
       );
@@ -128,7 +146,21 @@ export default function PluginsPage() {
   async function clear(plugin: Plugin, endpoint: PluginEndpoint) {
     try {
       await api.clearEndpoint(plugin.id, endpoint.id);
-      void message.success("已恢复为默认地址");
+      void message.success("已清除，插件确认之前不能连接");
+      reload();
+    } catch (err: unknown) {
+      void message.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function confirmDefault(plugin: Plugin, endpoint: PluginEndpoint) {
+    try {
+      await api.confirmEndpoint(plugin.id, endpoint.id, {
+        address: endpoint.default,
+        confirm: true,
+        digest: endpoint.digest,
+      });
+      void message.success("已确认，插件可以连接这个地址");
       reload();
     } catch (err: unknown) {
       void message.error(err instanceof Error ? err.message : String(err));
@@ -169,7 +201,9 @@ export default function PluginsPage() {
     return (
       <div style={{ marginBottom: 16 }}>
         <Space style={{ marginBottom: 8 }}>
-          <Typography.Text strong>联网地址（{network.hosts.length} 个）</Typography.Text>
+          <Typography.Text strong>
+            联网地址（{network.hosts.length} 个）
+          </Typography.Text>
           <Tag color={NETWORK_STATE[network.state].color}>
             {NETWORK_STATE[network.state].label}
           </Tag>
@@ -238,7 +272,7 @@ export default function PluginsPage() {
         ),
       },
       {
-        title: "当前使用",
+        title: "地址",
         dataIndex: "effective",
         key: "effective",
         render: (v: string) => (
@@ -271,18 +305,39 @@ export default function PluginsPage() {
         key: "actions",
         render: (_: unknown, e: PluginEndpoint) => (
           <Space>
-            <Button size="small" onClick={() => setEditing({ plugin, endpoint: e })}>
-              {e.state === "needs_confirmation" ? "重新确认" : "设置"}
+            {e.state === "default" && e.scope !== "internet" && (
+              <Popconfirm
+                title={`允许插件 ${plugin.name ?? plugin.id} 连接 ${e.default}？`}
+                description="这是插件清单里的默认地址"
+                okText="确认"
+                cancelText="取消"
+                onConfirm={() => void confirmDefault(plugin, e)}
+              >
+                <Button size="small" type="primary">
+                  确认默认地址
+                </Button>
+              </Popconfirm>
+            )}
+            <Button
+              size="small"
+              type={e.state === "needs_confirmation" ? "primary" : "default"}
+              onClick={() => setEditing({ plugin, endpoint: e })}
+            >
+              {e.state === "needs_confirmation"
+                ? "重新确认"
+                : e.state === "default" && e.scope === "internet"
+                  ? "确认地址"
+                  : "修改地址"}
             </Button>
             {e.configured !== null && (
               <Popconfirm
-                title="恢复为默认地址？"
-                description={`插件将改为连接 ${e.default}`}
+                title="清除已保存的地址？"
+                description={`插件的地址回到默认的 ${e.default}，确认之前不能连接`}
                 okText="恢复"
                 cancelText="取消"
                 onConfirm={() => void clear(plugin, e)}
               >
-                <Button size="small">恢复默认</Button>
+                <Button size="small">清除</Button>
               </Popconfirm>
             )}
           </Space>
@@ -309,7 +364,14 @@ export default function PluginsPage() {
         </Button>
       }
     >
-      {error && <Alert type="error" showIcon message={error.message} style={{ marginBottom: 16 }} />}
+      {error && (
+        <Alert
+          type="error"
+          showIcon
+          message={error.message}
+          style={{ marginBottom: 16 }}
+        />
+      )}
       <Table<Plugin>
         rowKey={(p) => p.path}
         columns={columns}
@@ -324,7 +386,8 @@ export default function PluginsPage() {
             </>
           ),
           rowExpandable: (p) =>
-            p.endpoints.length > 0 || (p.network !== null && p.network.state !== "none"),
+            p.endpoints.length > 0 ||
+            (p.network !== null && p.network.state !== "none"),
         }}
         locale={{ emptyText: "插件目录里还没有插件" }}
       />

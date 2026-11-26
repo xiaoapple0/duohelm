@@ -138,7 +138,7 @@ def session_for(
     """平台运行插件的入口：带上用户在插件页确认过的连接地址。
 
     平台代码（同步任务等）应当用它，而不是直接构造 :class:`PluginSession`；直接构造时
-    不传 ``endpoints``，插件只会拿到清单的 default，而且连不上。
+    不传 ``endpoints``，插件拿不到任何 endpoint 的地址（``endpoint()`` 报错）。
     """
     if entry.manifest is None:
         raise PluginRunError("load", f"插件 {entry.id} 的清单无效，不能运行")
@@ -171,9 +171,9 @@ class PluginSession:
         network: Sequence[str] = (),
     ) -> None:
         """``endpoints``：用户确认过的连接地址（endpoint id -> ``主机:端口``），通常来自
-        :meth:`duohelm.endpoints.EndpointStore.addresses_for`。只有这里的地址放行；没给的
-        endpoint，插件的 ``endpoint()`` 返回清单的 default，但不放行。启动子进程之前按
-        scope 再校验一次。
+        :meth:`duohelm.endpoints.EndpointStore.addresses_for`。只有这里的地址交给插件并放行；
+        没给的 endpoint，插件的 ``endpoint()`` 报错（提示用户去插件页确认），也不放行。
+        启动子进程之前按 scope 再校验一次。
 
         ``network``：放行的清单 network 地址，来自
         :meth:`duohelm.endpoints.EndpointStore.network_for`（用户确认过才有）。默认为空，
@@ -246,8 +246,11 @@ class PluginSession:
             approved = checked_network(self._manifest, self._network)
         except EndpointConfigError as exc:
             raise PluginRunError("load", str(exc)) from None
-        # 只放行用户确认过的地址：没确认的 endpoint（用 default 的）不进白名单
-        network = [*approved, *(str(addresses[k]) for k in self._endpoint_texts)]
+        # 只有用户确认过的地址交给插件并放行；没确认的 endpoint 只告诉子进程它的 id
+        network = [*approved, *(str(a) for a in addresses.values())]
+        unconfirmed = sorted(
+            e.id for e in self._manifest.permissions.endpoints if e.id not in addresses
+        )
         workdir = Path(tempfile.mkdtemp(prefix="duohelm-plugin-"))
         self.workdir = workdir
         self._inputs = FrameStore(workdir, "in")
@@ -307,6 +310,7 @@ class PluginSession:
                 "kind": self._kind,
                 "network": network,
                 "endpoints": {k: {"host": a.host, "port": a.port} for k, a in addresses.items()},
+                "unconfirmed_endpoints": unconfirmed,
             }
         )
         started = self._receive(self.limits.startup_timeout_s)

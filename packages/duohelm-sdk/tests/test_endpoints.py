@@ -210,6 +210,16 @@ def test_endpoint_in_platform_ignores_default() -> None:
         endpoint("other", default="127.0.0.1:1")
 
 
+def test_unconfirmed_endpoint_raises_in_platform() -> None:
+    """用户还没确认的 endpoint：平台不传地址，代码里的 default 也不用，报错提示去插件页确认。"""
+    ctx._install({}, unconfirmed=["miniqmt"])  # pyright: ignore[reportPrivateUsage]
+    assert ctx.in_platform()
+    with pytest.raises(EndpointNotConfiguredError, match="插件页确认"):
+        endpoint("miniqmt", default="127.0.0.1:58610")
+    with pytest.raises(EndpointNotConfiguredError, match="没有声明"):
+        endpoint("other", default="127.0.0.1:1")
+
+
 # ---- 可选的连接检查 ----
 
 

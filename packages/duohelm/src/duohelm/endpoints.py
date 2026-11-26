@@ -15,8 +15,8 @@ endpoints：
   校验一次（第二次校验，见 :func:`checked_addresses`）
 - 是否需要重新确认只看清单里 endpoints 那一节的哈希（:func:`endpoints_digest`）：插件升版本、
   改描述等清单其他部分的改动不需要重新确认；这一节变了，已保存的地址在重新确认之前不使用
-- **没确认过的 endpoint 一律不放行**，包括清单的 default：插件的 ``endpoint()`` 仍然返回
-  default（方便插件提示用户），但这个地址不进网络白名单，连接会被拦截
+- **没确认过的 endpoint 一律不放行**，包括清单的 default：平台不把任何地址交给插件，
+  插件的 ``endpoint()`` 抛 ``EndpointNotConfiguredError``；网络白名单里也没有它
 - 每次确认、清除、撤销都记审计日志（只在本机数据库里）。普通日志不写具体地址
 
 地址保存在 ``DUOHELM_HOME/plugin-config.db``，不进任何仓库。
@@ -131,16 +131,16 @@ def checked_network(manifest: Manifest, network: Sequence[str]) -> list[str]:
 def checked_addresses(manifest: Manifest, addresses: Mapping[str, str]) -> dict[str, Address]:
     """把要传给插件的地址逐个按 scope 校验（启动子进程前的第二次校验）。
 
-    ``addresses`` 里没有的 endpoint 用清单的 default（只作为 ``endpoint()`` 的返回值，
-    不放行）；清单里没有声明的 id 直接报错。
+    只校验并返回 ``addresses`` 里的（用户确认过的）endpoint；没给的不补 default，插件拿不到
+    它的地址。清单里没有声明的 id 直接报错。
     """
     declared = {e.id: e for e in manifest.permissions.endpoints}
     unknown = sorted(set(addresses) - set(declared))
     if unknown:
         raise UnknownEndpointError(manifest.id, ", ".join(unknown))
     result: dict[str, Address] = {}
-    for endpoint_id, endpoint in declared.items():
-        text = addresses.get(endpoint_id, endpoint.default)
+    for endpoint_id, text in addresses.items():
+        endpoint = declared[endpoint_id]
         try:
             result[endpoint_id] = parse_address(text, endpoint.scope)
         except AddressError:
@@ -162,8 +162,9 @@ class EndpointView:
     configured: str | None
     """用户保存过的地址（需要重新确认时也返回，方便用户核对）。"""
     effective: str
-    """插件的 ``endpoint()`` 现在返回的地址：已确认的地址，否则是 default。只有 state 为
-    confirmed 时这个地址才放行；其余状态下插件连不上它，需要用户先确认。"""
+    """state 为 confirmed 时是确认过的地址，插件的 ``endpoint()`` 返回它，也只有它放行；
+    其余状态下是清单的 default，只用来在页面上预先填好，插件拿不到它（``endpoint()``
+    报错），也连不上。"""
     confirmed_at: datetime | None
     digest: str
     """当前清单 endpoints 那一节的哈希。确认时传回来，防止确认的不是页面上看到的内容。"""
@@ -284,8 +285,8 @@ class EndpointStore:
     def addresses_for(self, manifest: Manifest) -> dict[str, str]:
         """用户确认过、并且仍然有效的地址（endpoint id -> 地址文本）。这些地址会放行。
 
-        没确认过或需要重新确认的 endpoint 不在结果里：插件的 ``endpoint()`` 返回清单的
-        default，但不放行。传给子进程之前还要经过 :func:`checked_addresses`。
+        没确认过或需要重新确认的 endpoint 不在结果里：插件拿不到地址（``endpoint()``
+        报错），也不放行。传给子进程之前还要经过 :func:`checked_addresses`。
         """
         return {v.endpoint.id: v.effective for v in self.views(manifest) if v.state == "confirmed"}
 

@@ -73,7 +73,8 @@ def _apply_permissions(start: dict[str, Any]) -> None:
     netguard.set_allowlist([str(item) for item in start.get("network", [])])
     endpoints: dict[str, Any] = start.get("endpoints", {})
     sdk_context._install(  # pyright: ignore[reportPrivateUsage]  平台专用的入口
-        {str(k): Address(str(v["host"]), int(v["port"])) for k, v in endpoints.items()}
+        {str(k): Address(str(v["host"]), int(v["port"])) for k, v in endpoints.items()},
+        unconfirmed=[str(k) for k in start.get("unconfirmed_endpoints", [])],
     )
 
 

@@ -107,7 +107,7 @@ sdk = ">=0.3,<0.4"
 entrypoint = "demo_source:plugin"
 
 [permissions]
-network = ["127.0.0.1:58610"]
+network = []
 
 [[permissions.endpoints]]
 id = "miniqmt"

@@ -21,10 +21,13 @@ from duohelm.settings import Settings
 from duohelm.tasks import TaskStore, TaskTypeRegistry, Worker
 from duohelm.tasks.builtin import builtin_task_types
 
+# API 只接受本机的 Host，写请求要带平台自己的 Origin（duohelm.api.security）
+LOCAL = "http://127.0.0.1:8765"
+
 
 def make(tmp_path: Path, *, dev: bool = False) -> tuple[TestClient, Worker]:
     settings = Settings(home=tmp_path, dev=dev)
-    client = TestClient(create_app(settings))
+    client = TestClient(create_app(settings), base_url=LOCAL, headers={"Origin": LOCAL})
     worker = Worker(TaskStore(settings.db_path), TaskTypeRegistry(builtin_task_types(settings)))
     return client, worker
 
@@ -170,7 +173,7 @@ def test_list_filters(tmp_path: Path) -> None:
 
 def test_serve_lifespan_runs_workers(tmp_path: Path) -> None:
     app = create_app(Settings(home=tmp_path), run_workers=True)
-    with TestClient(app) as client:
+    with TestClient(app, base_url=LOCAL, headers={"Origin": LOCAL}) as client:
         task_id = client.post("/api/tasks", json={"type": "plugins.scan"}).json()["id"]
         deadline = time.monotonic() + 10
         status = ""

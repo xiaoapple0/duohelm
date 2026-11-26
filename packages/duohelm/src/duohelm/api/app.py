@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from duohelm import __version__
 from duohelm.api.plugins import plugin_router
+from duohelm.api.security import install_origin_guard
 from duohelm.api.tasks import task_router
 from duohelm.endpoints import EndpointStore
 from duohelm.registry import PluginRegistry
@@ -70,6 +71,7 @@ def create_app(settings: Settings | None = None, *, run_workers: bool = False) -
                     logger.warning("%s 在 %s 秒内没有结束，强制退出", t.name, SHUTDOWN_TIMEOUT_S)
 
     app = FastAPI(title="DuoHelm", version=__version__, lifespan=lifespan)
+    install_origin_guard(app, settings)
     app.include_router(task_router(store, task_types))
     app.include_router(plugin_router(registry, endpoints))
 

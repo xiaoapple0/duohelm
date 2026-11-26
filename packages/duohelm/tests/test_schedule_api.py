@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import importlib
+import os
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-pytest.importorskip("fastapi")
-pytest.importorskip("httpx")
+# 本地缺少依赖时跳过；在 CI 上必须失败，不能静默跳过。
+for _module in ("fastapi", "httpx"):
+    if os.environ.get("CI"):
+        importlib.import_module(_module)
+    else:
+        pytest.importorskip(_module)
 
 from fastapi.testclient import TestClient
 

@@ -23,6 +23,8 @@ from pydantic import (
     model_validator,
 )
 
+from duohelm_sdk.endpoints import AddressError, EndpointScope, parse_address
+
 MANIFEST_FILENAME = "duohelm-plugin.toml"
 
 _PLUGIN_ID = r"^[a-z][a-z0-9-]{0,63}$"
@@ -86,7 +88,7 @@ class PluginInfo(_Model):
     @classmethod
     def _check_sdk(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("必须声明兼容的 SDK 版本范围，例如 '>=0.2,<0.3'")
+            raise ValueError("必须声明兼容的 SDK 版本范围，例如 '>=0.3,<0.4'")
         return _validate_spec(value)
 
     @field_validator("entrypoint")
@@ -97,9 +99,41 @@ class PluginInfo(_Model):
         return value
 
 
+class Endpoint(_Model):
+    """用户可配置的连接地址（SDK 0.3 起），例如 MiniQMT 的地址。见 :mod:`duohelm_sdk.endpoints`。
+
+    实际地址由用户在平台里配置并确认，插件用 :func:`duohelm_sdk.context.endpoint` 取得。
+    """
+
+    id: Annotated[str, Field(pattern=_FACTOR_ID)]
+    description: Annotated[str, Field(min_length=1, max_length=200)]
+    default: str
+    """默认地址 ``主机:端口``，必须符合 scope。"""
+    scope: EndpointScope
+    """用户能填的地址范围：loopback / lan / internet。"""
+
+    @model_validator(mode="after")
+    def _check_default(self) -> Self:
+        try:
+            parse_address(self.default, self.scope)
+        except AddressError as exc:
+            raise ValueError(f"endpoint {self.id!r} 的 default 不符合 scope：{exc}") from None
+        return self
+
+
 class Permissions(_Model):
     network: tuple[str, ...] = ()
     """插件需要访问的主机名（可带端口）。不允许协议、路径和通配符。"""
+    endpoints: tuple[Endpoint, ...] = ()
+    """用户可配置的连接地址（SDK 0.3 起）。这一节变了（不含清单的其他部分），用户需要重新确认。"""
+
+    @field_validator("endpoints")
+    @classmethod
+    def _check_endpoint_ids(cls, value: tuple[Endpoint, ...]) -> tuple[Endpoint, ...]:
+        ids = [e.id for e in value]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"endpoint id 重复: {_duplicates(ids)}")
+        return value
 
     @field_validator("network")
     @classmethod

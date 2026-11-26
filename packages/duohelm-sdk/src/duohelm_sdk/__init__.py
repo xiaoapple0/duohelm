@@ -8,8 +8,11 @@
     from duohelm_sdk.checks import check_no_lookahead
 """
 
+from duohelm_sdk.context import EndpointNotConfiguredError, endpoint
+from duohelm_sdk.endpoints import Address, AddressError, EndpointScope, parse_address
 from duohelm_sdk.manifest import (
     MANIFEST_FILENAME,
+    Endpoint,
     FactorSpec,
     Manifest,
     ManifestError,
@@ -24,6 +27,7 @@ from duohelm_sdk.protocols import (
     AccountInfo,
     BrokerPlugin,
     Capabilities,
+    ConnectionStatus,
     DataSourcePlugin,
     FactorPlugin,
     Freq,
@@ -34,6 +38,7 @@ from duohelm_sdk.protocols import (
     OrderSide,
     OrderStatus,
     Position,
+    SupportsConnectionCheck,
 )
 from duohelm_sdk.version import SDK_VERSION
 
@@ -41,9 +46,15 @@ __all__ = [
     "MANIFEST_FILENAME",
     "SDK_VERSION",
     "AccountInfo",
+    "Address",
+    "AddressError",
     "BrokerPlugin",
     "Capabilities",
+    "ConnectionStatus",
     "DataSourcePlugin",
+    "Endpoint",
+    "EndpointNotConfiguredError",
+    "EndpointScope",
     "FactorPlugin",
     "FactorSpec",
     "Freq",
@@ -60,6 +71,9 @@ __all__ = [
     "PluginKind",
     "Position",
     "Requirement",
+    "SupportsConnectionCheck",
+    "endpoint",
     "load_manifest",
+    "parse_address",
     "parse_manifest",
 ]

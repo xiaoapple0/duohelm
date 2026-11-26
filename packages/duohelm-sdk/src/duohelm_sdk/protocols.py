@@ -40,6 +40,27 @@ class Capabilities:
     """
 
 
+@dataclass(frozen=True)
+class ConnectionStatus:
+    """:meth:`SupportsConnectionCheck.check_connection` 的结果（SDK 0.3 起）。"""
+
+    ok: bool
+    message: str = ""
+    """失败时给用户看的说明，例如“连不上 MiniQMT，请打开并登录”。不要写入密码等凭据。"""
+
+
+@runtime_checkable
+class SupportsConnectionCheck(Protocol):
+    """可选：插件能快速检查数据源是否连得上（SDK 0.3 起）。
+
+    平台在同步任务开始时，如果插件实现了它，先调用一次；``ok`` 为 False 时任务直接失败，
+    把 ``message`` 展示给用户，不进入下载。实现要快（几秒内返回），连接失败返回
+    ``ConnectionStatus(ok=False, ...)``，不要抛异常。
+    """
+
+    def check_connection(self) -> ConnectionStatus: ...
+
+
 @runtime_checkable
 class DataSourcePlugin(Protocol):
     """行情源插件。返回的数据必须符合 schema 中的标准格式，平台入库前会校验。"""

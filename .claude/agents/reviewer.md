@@ -61,7 +61,7 @@ git log --oneline origin/main..HEAD
 - 凭据处理
 - 交易执行：下单、撤单、仓位、风控、实盘开关、紧急停止
 - `PRINCIPLES.md`、`ROADMAP.md`、`AGENTS.md` 的内容
-- `.claude/` 下的 agent 定义和设置：`.claude/agents/`（包括本文件）、`.claude/settings*.json`。审查规则不能被它审查的改动悄悄放松
+- `CLAUDE.md`，以及 `.claude/` 下的一切（`agents/`，包括本文件，`commands/`、`skills/`、`settings*.json`、hooks 配置等）：它们决定 agent 读哪些规则、怎么行事。审查规则不能被它审查的改动悄悄放松
 - 未来函数检查、回测成交规则、复权和 point-in-time 逻辑（高风险，PR 说明里要写明对结果的影响）
 
 ### 4. CI 与分支保护

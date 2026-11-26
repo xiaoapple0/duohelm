@@ -503,7 +503,7 @@ def test_lookup_returning_unrequested_code_fails(settings: Settings, small_scan:
 
 def test_scan_ranges_cover_a_shares_and_bj() -> None:
     symbols = delisted.scan_symbols()
-    assert len(symbols) == len(set(symbols)) == 6000 + 2000 + 4999 + 2000 + 1000
+    assert len(symbols) == len(set(symbols)) == 6000 + 2000 + 4999 + 3000 + 1000
     for symbol in [
         "600000.SH",
         "605999.SH",
@@ -513,6 +513,8 @@ def test_scan_ranges_cover_a_shares_and_bj() -> None:
         "003816.SZ",
         "300750.SZ",
         "301999.SZ",
+        "302132.SZ",
+        "302999.SZ",
         "920000.BJ",
     ]:
         assert symbol in symbols

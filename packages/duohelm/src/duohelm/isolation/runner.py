@@ -27,7 +27,7 @@ from typing import Any, BinaryIO, Literal, Self, cast
 import polars as pl
 import psutil
 
-from duohelm.endpoints import EndpointConfigError, checked_addresses
+from duohelm.endpoints import EndpointConfigError, EndpointStore, checked_addresses
 from duohelm.isolation.protocol import (
     FrameStore,
     ProtocolError,
@@ -119,6 +119,32 @@ def child_env(workdir: Path, parent: Mapping[str, str] | None = None) -> dict[st
 
 
 _EOF = object()
+
+
+def session_for(
+    entry: PluginEntry,
+    store: EndpointStore,
+    *,
+    deps: Sequence[PluginEntry] = (),
+    limits: Limits | None = None,
+    cancel: threading.Event | None = None,
+    log: Callable[[str], None] | None = None,
+) -> PluginSession:
+    """平台运行插件的入口：带上用户在插件页确认过的连接地址。
+
+    平台代码（同步任务等）应当用它，而不是直接构造 :class:`PluginSession`；直接构造时
+    不传 ``endpoints``，插件只会拿到清单的 default。
+    """
+    if entry.manifest is None:
+        raise PluginRunError("load", f"插件 {entry.id} 的清单无效，不能运行")
+    return PluginSession(
+        entry,
+        deps=deps,
+        limits=limits,
+        cancel=cancel,
+        log=log,
+        endpoints=store.addresses_for(entry.manifest),
+    )
 
 
 class PluginSession:

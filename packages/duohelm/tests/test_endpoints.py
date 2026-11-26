@@ -20,7 +20,7 @@ from duohelm.endpoints import (
     checked_addresses,
     endpoints_digest,
 )
-from duohelm.isolation import Limits, PluginRunError, PluginSession
+from duohelm.isolation import Limits, PluginRunError, PluginSession, session_for
 from duohelm.isolation.netguard import Allowlist
 from duohelm.registry import PluginEntry, PluginRegistry, PluginStatus
 from duohelm_sdk import Address, ConnectionStatus, Manifest, parse_manifest
@@ -213,8 +213,9 @@ def test_checked_addresses_fills_defaults() -> None:
 
 @pytest.mark.parametrize("address", ["miniqmt.lan:58610", "8.8.8.8:58610", "192.168.1.2"])
 def test_checked_addresses_rejects_outside_scope(address: str) -> None:
-    with pytest.raises(EndpointConfigError, match="不符合 lan"):
+    with pytest.raises(EndpointConfigError, match="不符合 lan") as info:
         checked_addresses(manifest(), {"svc": address})
+    assert address.split(":", maxsplit=1)[0] not in str(info.value)  # 不写地址
 
 
 def test_checked_addresses_rejects_undeclared() -> None:
@@ -387,6 +388,18 @@ def test_plugin_receives_confirmed_address(tmp_path: Path) -> None:
     assert df.row(0) == ("192.168.31.5", 58610, True)
 
 
+def test_confirmed_address_reaches_plugin(tmp_path: Path) -> None:
+    """完整路径：用户在平台里确认的地址，经 session_for 传到插件里的 endpoint()。"""
+    entry = make_entry(tmp_path / "plugins")
+    assert entry.manifest is not None
+    store = EndpointStore(tmp_path / "plugin-config.db")
+    with session_for(entry, store, limits=FAST) as s:
+        assert s.call("compute", "endpoint", DATA).row(0)[:2] == ("127.0.0.1", 58610)
+    store.confirm(entry.manifest, "svc", "192.168.31.5:58610", confirmed=True)
+    with session_for(entry, store, limits=FAST) as s:
+        assert s.call("compute", "endpoint", DATA).row(0)[:2] == ("192.168.31.5", 58610)
+
+
 def test_plugin_receives_default_without_config(tmp_path: Path) -> None:
     entry = make_entry(tmp_path)
     with PluginSession(entry, limits=FAST) as s:
@@ -544,6 +557,7 @@ def test_session_refuses_address_outside_scope(tmp_path: Path, address: str) -> 
         session.start()
     assert info.value.reason == "load"
     assert "不符合 lan" in info.value.message
+    assert address.split(":", maxsplit=1)[0] not in info.value.message  # 错误会进任务日志，不写地址
     assert session.workdir is None  # 还没有创建会话目录，也没有启动进程
     session.close()
 

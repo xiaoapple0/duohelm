@@ -3,6 +3,12 @@
 强度和威胁模型见 docs/subsystems/plugins.md 的"隔离"一节。
 """
 
-from duohelm.isolation.runner import Limits, PluginRunError, PluginSession, child_env
+from duohelm.isolation.runner import (
+    Limits,
+    PluginRunError,
+    PluginSession,
+    child_env,
+    session_for,
+)
 
-__all__ = ["Limits", "PluginRunError", "PluginSession", "child_env"]
+__all__ = ["Limits", "PluginRunError", "PluginSession", "child_env", "session_for"]

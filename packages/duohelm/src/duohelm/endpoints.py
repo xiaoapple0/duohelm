@@ -94,9 +94,11 @@ def checked_addresses(manifest: Manifest, addresses: Mapping[str, str]) -> dict[
         text = addresses.get(endpoint_id, endpoint.default)
         try:
             result[endpoint_id] = parse_address(text, endpoint.scope)
-        except AddressError as exc:
+        except AddressError:
+            # 这条消息会进任务日志：只写 endpoint 和 scope，不写地址
             raise EndpointConfigError(
-                f"插件 {manifest.id} 的 endpoint {endpoint_id!r} 地址不符合 {endpoint.scope}：{exc}"
+                f"插件 {manifest.id} 的 endpoint {endpoint_id!r} 的地址"
+                f"不符合 {endpoint.scope} 范围，请在插件页重新设置"
             ) from None
     return result
 
@@ -286,11 +288,14 @@ class EndpointStore:
         now = _now_ms()
         with self._transaction() as conn:
             old = conn.execute(
-                "DELETE FROM plugin_endpoints WHERE plugin_id = ? AND endpoint_id = ? "
-                "RETURNING address",
+                "SELECT address FROM plugin_endpoints WHERE plugin_id = ? AND endpoint_id = ?",
                 (manifest.id, endpoint_id),
             ).fetchone()
             if old is not None:
+                conn.execute(
+                    "DELETE FROM plugin_endpoints WHERE plugin_id = ? AND endpoint_id = ?",
+                    (manifest.id, endpoint_id),
+                )
                 self._record(conn, manifest.id, endpoint_id, "clear", old, None, digest, now)
         if old is not None:
             logger.info("插件 %s 的 endpoint %s 已恢复为默认地址", manifest.id, endpoint_id)

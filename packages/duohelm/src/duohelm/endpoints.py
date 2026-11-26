@@ -91,6 +91,18 @@ class ConfirmationRequiredError(EndpointConfigError):
     """保存前没有确认，或 internet 范围没有额外确认。"""
 
 
+class StaleConfirmationError(ConfirmationRequiredError):
+    """用户确认时看到的内容（按哈希）和服务器上的清单不一致：清单在这期间变了。"""
+
+    def __init__(self) -> None:
+        super().__init__("插件清单在你确认之前变了，请刷新页面，核对后重新确认")
+
+
+def _check_expected(expected: str | None, actual: str) -> None:
+    if expected is not None and expected != actual:
+        raise StaleConfirmationError
+
+
 def endpoints_digest(manifest: Manifest) -> str:
     """只对清单里 ``[[permissions.endpoints]]`` 这一节算的哈希（规范化 JSON 的 sha256）。"""
     section = [e.model_dump(mode="json") for e in manifest.permissions.endpoints]
@@ -150,6 +162,8 @@ class EndpointView:
     effective: str
     """插件现在会拿到的地址：已确认的地址，否则是 default。"""
     confirmed_at: datetime | None
+    digest: str
+    """当前清单 endpoints 那一节的哈希。确认时传回来，防止确认的不是页面上看到的内容。"""
 
 
 @dataclass(frozen=True)
@@ -163,6 +177,8 @@ class NetworkView:
     approved_hosts: tuple[str, ...] | None
     """用户上次确认的列表（需要重新确认时也返回，方便对比）。"""
     approved_at: datetime | None
+    digest: str
+    """当前清单 network 列表的哈希。确认时传回来，防止确认的不是页面上看到的列表。"""
 
 
 @dataclass(frozen=True)
@@ -243,7 +259,9 @@ class EndpointStore:
             row = rows.get(endpoint.id)
             if row is None:
                 views.append(
-                    EndpointView(manifest.id, endpoint, "default", None, endpoint.default, None)
+                    EndpointView(
+                        manifest.id, endpoint, "default", None, endpoint.default, None, digest
+                    )
                 )
                 continue
             confirmed = row["endpoints_digest"] == digest
@@ -255,6 +273,7 @@ class EndpointStore:
                     configured=row["address"],
                     effective=row["address"] if confirmed else endpoint.default,
                     confirmed_at=_to_datetime(row["confirmed_at"]),
+                    digest=digest,
                 )
             )
         return views
@@ -280,7 +299,9 @@ class EndpointStore:
             state = "approved"
         else:
             state = "needs_approval"
-        return NetworkView(manifest.id, hosts, state, approved, approved_at)
+        return NetworkView(
+            manifest.id, hosts, state, approved, approved_at, network_digest(manifest)
+        )
 
     def network_for(self, manifest: Manifest) -> list[str]:
         """要放行的 network 地址：用户确认过当前列表时是整个列表，否则为空（不能联网）。"""
@@ -316,11 +337,16 @@ class EndpointStore:
         *,
         confirmed: bool,
         confirm_internet: bool = False,
+        expected_digest: str | None = None,
     ) -> EndpointView:
-        """保存并确认地址（保存时的第一次校验）。同一个地址再确认一次，即“重新确认”。"""
+        """保存并确认地址（保存时的第一次校验）。同一个地址再确认一次，即“重新确认”。
+
+        ``expected_digest``：用户确认时页面上 endpoints 那一节的哈希；和当前清单对不上时拒绝。
+        API 必须传；``None`` 只给调用方自己读了当前清单的场合（测试等）。"""
         endpoint = _declared(manifest, endpoint_id)
         if not confirmed:
             raise ConfirmationRequiredError("保存连接地址需要确认")
+        _check_expected(expected_digest, endpoints_digest(manifest))
         try:
             parsed = parse_address(address, endpoint.scope)
         except AddressError as exc:
@@ -390,14 +416,20 @@ class EndpointStore:
             logger.info("插件 %s 的 endpoint %s 已恢复为默认地址", manifest.id, endpoint_id)
         return self._view(manifest, endpoint_id)
 
-    def approve_network(self, manifest: Manifest, *, confirmed: bool) -> NetworkView:
-        """确认清单 network 的整个列表。列表变了以后再调用一次，即“重新确认”。"""
+    def approve_network(
+        self, manifest: Manifest, *, confirmed: bool, expected_digest: str | None = None
+    ) -> NetworkView:
+        """确认清单 network 的整个列表。列表变了以后再调用一次，即“重新确认”。
+
+        ``expected_digest``：用户确认时页面上列表的哈希；和当前清单对不上时拒绝，防止确认一个
+        没看过的列表。API 必须传；``None`` 只给调用方自己读了当前清单的场合（测试等）。"""
         hosts = list(manifest.permissions.network)
         if not hosts:
             raise EndpointConfigError(f"插件 {manifest.id} 的清单没有声明 network")
         if not confirmed:
             raise ConfirmationRequiredError("放行插件的网络地址需要确认")
         digest = network_digest(manifest)
+        _check_expected(expected_digest, digest)
         now = _now_ms()
         new_value = json.dumps(hosts, ensure_ascii=False)
         with self._transaction() as conn:

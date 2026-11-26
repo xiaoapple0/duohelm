@@ -22,9 +22,13 @@ from duohelm.settings import Settings
 
 WRITES = [
     ("post", "/api/tasks", {"type": "nope", "params": {}}),
-    ("put", "/api/plugins/x/network", {"confirm": True}),
+    ("put", "/api/plugins/x/network", {"confirm": True, "digest": "x"}),
     ("delete", "/api/plugins/x/network", None),
-    ("put", "/api/plugins/x/endpoints/svc", {"address": "127.0.0.1:1", "confirm": True}),
+    (
+        "put",
+        "/api/plugins/x/endpoints/svc",
+        {"address": "127.0.0.1:1", "confirm": True, "digest": "x"},
+    ),
 ]
 
 
@@ -104,7 +108,8 @@ def test_writes_need_platform_origin(
 def test_writes_from_platform_origin_pass_the_guard(app_settings: Settings, origin: str) -> None:
     """平台自己的来源通过校验：返回的是业务结果（插件不存在 404），不是 403。"""
     client = _client(app_settings, "http://127.0.0.1:8765")
-    r = client.put("/api/plugins/x/network", json={"confirm": True}, headers={"Origin": origin})
+    body = {"confirm": True, "digest": "x"}
+    r = client.put("/api/plugins/x/network", json=body, headers={"Origin": origin})
     assert r.status_code == 404
 
 

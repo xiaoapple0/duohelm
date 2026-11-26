@@ -137,7 +137,7 @@ export default function PluginsPage() {
 
   async function approveNetwork(plugin: Plugin) {
     try {
-      await api.approveNetwork(plugin.id);
+      await api.approveNetwork(plugin.id, plugin.network?.digest ?? "");
       void message.success("已确认，插件可以连接这些地址");
       reload();
     } catch (err: unknown) {

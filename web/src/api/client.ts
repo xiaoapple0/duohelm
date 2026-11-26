@@ -22,12 +22,15 @@ export interface PluginEndpoint {
   configured: string | null;
   effective: string;
   confirmed_at: string | null;
+  /** 当前清单 endpoints 那一节的哈希，确认时原样传回 */
+  digest: string;
 }
 
 export interface EndpointConfirm {
   address: string;
   confirm: true;
   confirm_internet?: boolean;
+  digest: string;
 }
 
 /** none：没有声明；approved：已确认；needs_approval：没确认过或列表变了，确认前插件不能联网。 */
@@ -38,6 +41,8 @@ export interface PluginNetwork {
   state: NetworkState;
   approved_hosts: string[] | null;
   approved_at: string | null;
+  /** 当前列表的哈希，确认时原样传回 */
+  digest: string;
 }
 
 export interface Plugin {
@@ -184,9 +189,10 @@ function query(params: Record<string, string | number | undefined>): string {
 export const api = {
   health: () => getJson<Health>("/api/health"),
   plugins: () => getJson<Plugin[]>("/api/plugins"),
-  approveNetwork: (pluginId: string) =>
+  approveNetwork: (pluginId: string, digest: string) =>
     putJson<PluginNetwork>(`/api/plugins/${encodeURIComponent(pluginId)}/network`, {
       confirm: true,
+      digest,
     }),
   revokeNetwork: (pluginId: string) =>
     deleteJson<PluginNetwork>(`/api/plugins/${encodeURIComponent(pluginId)}/network`),

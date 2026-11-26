@@ -34,6 +34,8 @@ class EndpointOut(BaseModel):
     configured: str | None
     effective: str
     confirmed_at: datetime | None
+    digest: str
+    """当前清单 endpoints 那一节的哈希，确认时原样传回。"""
 
     @classmethod
     def from_view(cls, view: EndpointView) -> EndpointOut:
@@ -47,6 +49,7 @@ class EndpointOut(BaseModel):
             configured=view.configured,
             effective=view.effective,
             confirmed_at=view.confirmed_at,
+            digest=view.digest,
         )
 
 
@@ -57,6 +60,8 @@ class NetworkOut(BaseModel):
     """none：没有声明；approved：已确认；needs_approval：没确认过或列表变了，确认前不能联网。"""
     approved_hosts: list[str] | None
     approved_at: datetime | None
+    digest: str
+    """当前 network 列表的哈希，确认时原样传回。"""
 
     @classmethod
     def from_view(cls, view: NetworkView) -> NetworkOut:
@@ -65,6 +70,7 @@ class NetworkOut(BaseModel):
             state=view.state,
             approved_hosts=None if view.approved_hosts is None else list(view.approved_hosts),
             approved_at=view.approved_at,
+            digest=view.digest,
         )
 
 
@@ -99,6 +105,8 @@ class PluginOut(BaseModel):
 class NetworkApprove(BaseModel):
     confirm: Literal[True]
     """必须为 true：用户已经看过插件要连接的整个地址列表并确认。"""
+    digest: str
+    """页面上显示的列表的哈希（NetworkOut.digest）。和服务器上的清单对不上时返回 409。"""
 
 
 class EndpointConfirm(BaseModel):
@@ -108,6 +116,8 @@ class EndpointConfirm(BaseModel):
     """必须为 true：用户已经看过“插件将可以连接这个地址”的提示并确认。"""
     confirm_internet: bool = False
     """scope 为 internet 时必须为 true（额外确认）。"""
+    digest: str
+    """页面上显示的 endpoint 的哈希（EndpointOut.digest）。和服务器上的清单对不上时返回 409。"""
 
 
 def plugin_router(registry: PluginRegistry, store: EndpointStore) -> APIRouter:
@@ -133,7 +143,9 @@ def plugin_router(registry: PluginRegistry, store: EndpointStore) -> APIRouter:
     @router.put("/{plugin_id}/network", response_model=NetworkOut)
     def approve_network(plugin_id: str, body: NetworkApprove) -> NetworkOut:
         try:
-            view = store.approve_network(manifest_of(plugin_id), confirmed=body.confirm)
+            view = store.approve_network(
+                manifest_of(plugin_id), confirmed=body.confirm, expected_digest=body.digest
+            )
         except EndpointConfigError as exc:
             raise config_error(exc) from None
         return NetworkOut.from_view(view)
@@ -156,6 +168,7 @@ def plugin_router(registry: PluginRegistry, store: EndpointStore) -> APIRouter:
                 body.address,
                 confirmed=body.confirm,
                 confirm_internet=body.confirm_internet,
+                expected_digest=body.digest,
             )
         except EndpointConfigError as exc:
             raise config_error(exc) from None

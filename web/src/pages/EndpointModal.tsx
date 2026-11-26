@@ -46,6 +46,7 @@ export default function EndpointModal({ pluginId, pluginName, endpoint, onClose,
           address: values.address.trim(),
           confirm: true,
           confirm_internet: internet ? values.confirmInternet : false,
+          digest: endpoint.digest,
         }),
       );
     } catch (err: unknown) {

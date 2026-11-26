@@ -56,6 +56,11 @@ def client(tmp_path: Path, make_plugin: MakePlugin) -> TestClient:
     )
 
 
+def _ep_digest(client: TestClient) -> str:
+    """页面上显示的 endpoint 的 digest（确认时原样传回）。"""
+    return str(client.get("/api/plugins/xt/endpoints").json()[0]["digest"])
+
+
 def _rewrite(tmp_path: Path, text: str) -> None:
     (tmp_path / "plugins" / "xt" / "duohelm-plugin.toml").write_text(text, encoding="utf-8")
 
@@ -69,7 +74,9 @@ def test_plugins_list_includes_endpoints(client: TestClient) -> None:
 
 def test_confirm_and_clear(client: TestClient, tmp_path: Path) -> None:
     url = "/api/plugins/xt/endpoints/miniqmt"
-    r = client.put(url, json={"address": "192.168.31.5:58610", "confirm": True})
+    r = client.put(
+        url, json={"address": "192.168.31.5:58610", "confirm": True, "digest": _ep_digest(client)}
+    )
     assert r.status_code == 200, r.text
     assert (r.json()["state"], r.json()["effective"]) == ("confirmed", "192.168.31.5:58610")
     (ep,) = client.get("/api/plugins/xt/endpoints").json()
@@ -84,16 +91,28 @@ def test_confirm_and_clear(client: TestClient, tmp_path: Path) -> None:
 def test_confirm_must_be_true(client: TestClient) -> None:
     url = "/api/plugins/xt/endpoints/miniqmt"
     assert (
-        client.put(url, json={"address": "192.168.31.5:58610", "confirm": False}).status_code == 422
+        client.put(
+            url,
+            json={"address": "192.168.31.5:58610", "confirm": False, "digest": _ep_digest(client)},
+        ).status_code
+        == 422
     )
-    assert client.put(url, json={"address": "192.168.31.5:58610"}).status_code == 422
+    assert (
+        client.put(
+            url, json={"address": "192.168.31.5:58610", "digest": _ep_digest(client)}
+        ).status_code
+        == 422
+    )
     (ep,) = client.get("/api/plugins/xt/endpoints").json()
     assert ep["state"] == "default"
 
 
 @pytest.mark.parametrize("address", ["miniqmt.lan:58610", "8.8.8.8:58610", "192.168.31.5"])
 def test_save_rejects_address_outside_scope(client: TestClient, address: str) -> None:
-    r = client.put("/api/plugins/xt/endpoints/miniqmt", json={"address": address, "confirm": True})
+    r = client.put(
+        "/api/plugins/xt/endpoints/miniqmt",
+        json={"address": address, "confirm": True, "digest": _ep_digest(client)},
+    )
     assert r.status_code == 422
     assert isinstance(r.json()["detail"], str) and r.json()["detail"]
 
@@ -104,13 +123,13 @@ def test_internet_needs_extra_confirmation(tmp_path: Path, make_plugin: MakePlug
         create_app(Settings(home=tmp_path)), base_url=LOCAL, headers={"Origin": LOCAL}
     )
     url = "/api/plugins/xt/endpoints/miniqmt"
-    body = {"address": "qmt.example.com:58610", "confirm": True}
+    body = {"address": "qmt.example.com:58610", "confirm": True, "digest": _ep_digest(client)}
     assert client.put(url, json=body).status_code == 409
     assert client.put(url, json={**body, "confirm_internet": True}).status_code == 200
 
 
 def test_unknown_plugin_or_endpoint(client: TestClient) -> None:
-    body = {"address": "192.168.31.5:58610", "confirm": True}
+    body = {"address": "192.168.31.5:58610", "confirm": True, "digest": "x"}
     assert client.put("/api/plugins/nope/endpoints/miniqmt", json=body).status_code == 404
     assert client.put("/api/plugins/xt/endpoints/nope", json=body).status_code == 404
     assert client.get("/api/plugins/nope/endpoints").status_code == 404
@@ -118,7 +137,9 @@ def test_unknown_plugin_or_endpoint(client: TestClient) -> None:
 
 def test_reconfirmation_only_when_endpoints_change(client: TestClient, tmp_path: Path) -> None:
     url = "/api/plugins/xt/endpoints/miniqmt"
-    client.put(url, json={"address": "192.168.31.5:58610", "confirm": True})
+    client.put(
+        url, json={"address": "192.168.31.5:58610", "confirm": True, "digest": _ep_digest(client)}
+    )
     _rewrite(tmp_path, manifest(version="2.0.0"))  # 插件升版本：不需要重新确认
     (ep,) = client.get("/api/plugins/xt/endpoints").json()
     assert (ep["state"], ep["effective"]) == ("confirmed", "192.168.31.5:58610")
@@ -126,7 +147,9 @@ def test_reconfirmation_only_when_endpoints_change(client: TestClient, tmp_path:
     (ep,) = client.get("/api/plugins/xt/endpoints").json()
     assert ep["state"] == "needs_confirmation"
     assert (ep["configured"], ep["effective"]) == ("192.168.31.5:58610", "127.0.0.1:58610")
-    client.put(url, json={"address": "192.168.31.5:58610", "confirm": True})
+    client.put(
+        url, json={"address": "192.168.31.5:58610", "confirm": True, "digest": _ep_digest(client)}
+    )
     (ep,) = client.get("/api/plugins/xt/endpoints").json()
     assert ep["state"] == "confirmed"
 
@@ -172,9 +195,18 @@ def test_network_listed_and_needs_approval(net_client: TestClient) -> None:
 
 
 def test_network_approve_and_revoke(net_client: TestClient, tmp_path: Path) -> None:
-    assert net_client.put("/api/plugins/net/network", json={"confirm": False}).status_code == 422
+    assert (
+        net_client.put(
+            "/api/plugins/net/network",
+            json={"confirm": False, "digest": _network(net_client)["digest"]},
+        ).status_code
+        == 422
+    )
     assert net_client.put("/api/plugins/net/network", json={}).status_code == 422
-    r = net_client.put("/api/plugins/net/network", json={"confirm": True})
+    r = net_client.put(
+        "/api/plugins/net/network",
+        json={"confirm": True, "digest": _network(net_client)["digest"]},
+    )
     assert (r.status_code, r.json()["state"]) == (200, "approved")
     store = EndpointStore(tmp_path / "plugin-config.db")
     assert store.network_for(parse_manifest(net_manifest())) == ["8.8.8.8:53", "api.example.com"]
@@ -184,7 +216,10 @@ def test_network_approve_and_revoke(net_client: TestClient, tmp_path: Path) -> N
 
 
 def test_network_change_requires_reapproval(net_client: TestClient, tmp_path: Path) -> None:
-    net_client.put("/api/plugins/net/network", json={"confirm": True})
+    net_client.put(
+        "/api/plugins/net/network",
+        json={"confirm": True, "digest": _network(net_client)["digest"]},
+    )
     path = tmp_path / "plugins" / "net" / "duohelm-plugin.toml"
     path.write_text(net_manifest(version="2.0.0"), encoding="utf-8")
     assert _network(net_client)["state"] == "approved"  # 只升版本：不需要重新确认
@@ -195,7 +230,39 @@ def test_network_change_requires_reapproval(net_client: TestClient, tmp_path: Pa
 
 
 def test_network_approve_without_network_declared(client: TestClient) -> None:
-    r = client.put("/api/plugins/xt/network", json={"confirm": True})
+    r = client.put("/api/plugins/xt/network", json={"confirm": True, "digest": "x"})
     assert r.status_code == 422
     (plugin,) = client.get("/api/plugins").json()
     assert plugin["network"]["state"] == "none"
+
+
+def test_network_approve_with_stale_digest_is_rejected(
+    net_client: TestClient, tmp_path: Path
+) -> None:
+    """用户看到列表之后、点确认之前清单变了：不能确认一个没看过的列表。"""
+    seen = _network(net_client)["digest"]
+    path = tmp_path / "plugins" / "net" / "duohelm-plugin.toml"
+    path.write_text(net_manifest('"8.8.8.8:53", "evil.example.com"'), encoding="utf-8")
+    r = net_client.put("/api/plugins/net/network", json={"confirm": True, "digest": seen})
+    assert r.status_code == 409
+    assert "变了" in r.json()["detail"]
+    assert _network(net_client)["state"] == "needs_approval"
+    store = EndpointStore(tmp_path / "plugin-config.db")
+    assert store.audit("net") == []
+
+
+def test_network_approve_requires_digest(net_client: TestClient) -> None:
+    r = net_client.put("/api/plugins/net/network", json={"confirm": True})
+    assert r.status_code == 422
+
+
+def test_endpoint_confirm_with_stale_digest_is_rejected(client: TestClient, tmp_path: Path) -> None:
+    seen = _ep_digest(client)
+    _rewrite(tmp_path, manifest(description="MiniQMT（改过）"))
+    r = client.put(
+        "/api/plugins/xt/endpoints/miniqmt",
+        json={"address": "192.168.31.5:58610", "confirm": True, "digest": seen},
+    )
+    assert r.status_code == 409
+    (ep,) = client.get("/api/plugins/xt/endpoints").json()
+    assert ep["state"] == "default"

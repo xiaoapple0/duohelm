@@ -18,7 +18,7 @@ from duohelm.endpoints import EndpointStore
 from duohelm.isolation import Limits, PluginRunError
 from duohelm.registry import PluginRegistry
 from duohelm.settings import Settings
-from duohelm.storage import DataStore
+from duohelm.storage import DataStore, SnapshotConflictError
 from duohelm.tasks import RetryableError, TaskStore, TaskTypeRegistry, Worker
 from duohelm.tasks.sync import SyncParams, SyncResult, data_sync, shanghai_today
 from duohelm.tasks.sync import _plugin_errors as plugin_errors  # pyright: ignore[reportPrivateUsage]
@@ -101,14 +101,21 @@ class Plain:
             for d in CALENDAR:
                 if start <= d <= last:
                     volume = 0.0 if (s, d) == ("000001.SZ", date(2024, 1, 3)) else 1000.0
-                    rows.append((d, s, 10.0, 11.0, 9.0, 10.5, volume, volume * 10.5))
+                    if B.get("null_volume") and s == "600000.SH" and d == start:
+                        volume = None
+                    amount = None if volume is None else volume * 10.5
+                    rows.append((d, s, 10.0, 11.0, 9.0, 10.5, volume, amount))
         if B.get("bad_bars"):
             rows.append((start, "999999.SH", 1.0, 1.0, 1.0, 1.0, 1.0, 1.0))
+        if B.get("late_bars"):
+            rows.append((date(2024, 1, 8), symbols[0], 1.0, 1.0, 1.0, 1.0, 1.0, 1.0))
         return pl.DataFrame(rows, schema=BARS_SCHEMA, orient="row")
 
     def adj_factors(self, symbols, start, end):
-        record("adj_factors")
-        rows = [(date(2024, 1, 4), "600000.SH", 1.05)] if "600000.SH" in symbols else []
+        # 和真实插件一样：用全部历史算累计因子，再按 [start, end] 过滤
+        record(f"adj_factors {start}")
+        rows = [(date(2020, 6, 1), "600000.SH", 1.02), (date(2024, 1, 4), "600000.SH", 1.071)]
+        rows = [r for r in rows if r[1] in symbols and start <= r[0] <= end]
         return pl.DataFrame(rows, schema=ADJ_FACTORS_SCHEMA, orient="row")
 
     def index_constituents(self, index, start, end):
@@ -122,10 +129,15 @@ class Checked(Plain):
             address = endpoint("src")
         except EndpointNotConfiguredError as exc:
             return ConnectionStatus(ok=False, message=str(exc))
+        record(f"check_connection {address}")
         return ConnectionStatus(ok=True, message=f"已连接 {address}")
 
 
-source = Checked() if B.get("check", True) else Plain()
+class Broken(Plain):
+    check_connection = None  # 写错了：属性存在但不可调用
+
+
+source = Broken() if B.get("broken_check") else Checked() if B.get("check", True) else Plain()
 """
 
 
@@ -195,9 +207,9 @@ def test_sync_uses_confirmed_address_and_writes_snapshot(settings: Settings) -> 
     store, task_id = run(settings)
     result = result_of(store, task_id)
 
-    assert result.connection == "已连接 127.0.0.1:58612"
-    assert calls(plugin)[:3] == [
+    assert calls(plugin)[:4] == [
         "check_connection",
+        "check_connection 127.0.0.1:58612",  # 插件拿到的是用户确认的地址
         "capabilities",
         "securities include_delisted=True",
     ]
@@ -206,6 +218,11 @@ def test_sync_uses_confirmed_address_and_writes_snapshot(settings: Settings) -> 
     assert result.symbols == 4
     assert result.dropped_zero_volume == 1
     assert result.snapshot_id is not None
+    # 任务日志和结果里不写具体地址
+    assert result.connection == "已连接 <src 的地址>"
+    logs = " ".join(log.message for log in store.logs(task_id))
+    assert "58612" not in logs
+    assert "58612" not in (store.get(task_id).result or "")
 
     data = DataStore(settings.data_dir)
     assert data.head() == result.snapshot_id
@@ -219,10 +236,61 @@ def test_sync_uses_confirmed_address_and_writes_snapshot(settings: Settings) -> 
         date(2024, 1, 4),
         date(2024, 1, 5),
     ]
-    assert data.read("adj_factors").rows() == [(date(2024, 1, 4), "600000.SH", 1.05)]
+    assert data.read("adj_factors").rows() == [
+        (date(2020, 6, 1), "600000.SH", 1.02),
+        (date(2024, 1, 4), "600000.SH", 1.071),
+    ]
     securities = data.read("securities")
     assert "830000.NQ" not in securities.get_column("symbol").to_list()
-    assert result.written == {"securities": 5, "calendar": 4, "bars_1d": 13, "adj_factors": 1}
+    assert result.written == {"securities": 5, "calendar": 4, "bars_1d": 13, "adj_factors": 2}
+
+
+def test_adj_factors_requested_from_earliest(settings: Settings) -> None:
+    """同步区间从除权日之后开始，也要拿到之前的累计因子，否则区间开头按 1.0 复权。"""
+    plugin = install(settings)
+    confirm(settings)
+    store, task_id = run(settings, start="2024-01-03")
+    result_of(store, task_id)
+    assert {c for c in calls(plugin) if c.startswith("adj_factors")} == {"adj_factors 1990-12-19"}
+    factors = DataStore(settings.data_dir).read("adj_factors")
+    assert (date(2020, 6, 1), "600000.SH", 1.02) in factors.rows()
+
+
+def test_null_volume_fails(settings: Settings) -> None:
+    """成交量为空是“不知道”，不能当成 0 按停牌丢掉。"""
+    install(settings, null_volume=True)
+    confirm(settings)
+    store, task_id = run(settings)
+    assert "成交量为空" in failed(store, task_id)
+    assert DataStore(settings.data_dir).head() is None
+
+
+def test_bars_outside_range_fail(settings: Settings) -> None:
+    install(settings, late_bars=True)
+    confirm(settings)
+    store, task_id = run(settings)
+    assert "日线" in failed(store, task_id)
+    assert DataStore(settings.data_dir).head() is None
+
+
+def test_snapshot_conflict_is_retried(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """提交时当前快照已被别的写入改变：转成 RetryableError，任务回到队列，不留下文件。"""
+    install(settings)
+    confirm(settings)
+
+    def conflict(self: object, *args: object, **kwargs: object) -> str:
+        raise SnapshotConflictError(None, "别的快照")
+
+    monkeypatch.setattr(DataStore, "_commit", conflict)
+    store = TaskStore(settings.db_path)
+    types = TaskTypeRegistry([data_sync(settings, limits=FAST)])
+    body = {"plugin_id": "fake-src", "start": START.isoformat(), "end": END.isoformat()}
+    task = store.create("data.sync", types.validate_params("data.sync", body), max_attempts=2)
+    assert Worker(store, types).run_once()
+    record = store.get(task.id)
+    assert record.status == "queued", record.error
+    assert record.error is not None and "快照" in record.error
+    assert list((settings.data_dir / "files").rglob("*.parquet")) == []
 
 
 def test_rerun_writes_nothing(settings: Settings) -> None:
@@ -258,13 +326,22 @@ def test_plugin_without_check_connection_is_not_checked(settings: Settings) -> N
     assert "check_connection" not in calls(plugin)
 
 
+def test_non_callable_check_connection_fails(settings: Settings) -> None:
+    """check_connection 存在但不可调用是插件的错，不能当成“没实现”跳过连接检查。"""
+    plugin = install(settings, broken_check=True)
+    store, task_id = run(settings)
+    error = failed(store, task_id)
+    assert "plugin_error" in error and "不可调用" in error
+    assert "capabilities" not in calls(plugin)
+
+
 def test_source_without_delisted_list_is_refused(settings: Settings) -> None:
     """不能列出退市证券的数据源暂不同步：只同步在市证券会有幸存者偏差。"""
     plugin = install(settings, lists_delisted=False)
     confirm(settings)
     store, task_id = run(settings)
     assert "幸存者偏差" in failed(store, task_id)
-    assert calls(plugin) == ["check_connection", "capabilities"]
+    assert calls(plugin) == ["check_connection", "check_connection 127.0.0.1:58612", "capabilities"]
     assert DataStore(settings.data_dir).head() is None
 
 

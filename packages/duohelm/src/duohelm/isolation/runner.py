@@ -146,8 +146,8 @@ def session_for(
 ) -> PluginSession:
     """平台运行插件的入口：带上用户在插件页确认过的连接地址。
 
-    平台代码（同步任务等）应当用它，而不是直接构造 :class:`PluginSession`；直接构造时
-    不传 ``endpoints``，插件拿不到任何 endpoint 的地址（``endpoint()`` 报错）。
+    平台代码（同步任务等）应当用它，而不是直接构造 :class:`PluginSession`：直接构造时
+    要自己传 ``endpoints`` 和 ``network``，容易传错。
     """
     if entry.manifest is None:
         raise PluginRunError("load", f"插件 {entry.id} 的清单无效，不能运行")

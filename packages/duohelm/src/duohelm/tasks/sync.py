@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Self
@@ -99,6 +99,8 @@ def data_sync(settings: Settings, *, limits: Limits | None = None) -> TaskType:
             raise SyncError(f"start（{params.start}）晚于今天（{end}）")
         entry, deps = find_datasource(settings, params.plugin_id)
         endpoints = EndpointStore(settings.plugin_config_path)
+        assert entry.manifest is not None  # find_datasource 已检查
+        addresses = endpoints.addresses_for(entry.manifest)
         data = DataStore(settings.data_dir)
         run_limits = limits or Limits.from_env()
 
@@ -112,7 +114,7 @@ def data_sync(settings: Settings, *, limits: Limits | None = None) -> TaskType:
                 entry, endpoints, deps=deps, limits=run_limits, cancel=cancel, log=plugin_log
             ) as session,
         ):
-            return _run(ctx, session, data, params.start, end)
+            return _run(ctx, session, data, params.start, end, addresses=addresses)
 
     return TaskType(
         name="data.sync",
@@ -142,12 +144,18 @@ def find_datasource(settings: Settings, plugin_id: str) -> tuple[PluginEntry, li
 
 
 def _run(
-    ctx: TaskContext, session: PluginSession, data: DataStore, start: date, end: date
+    ctx: TaskContext,
+    session: PluginSession,
+    data: DataStore,
+    start: date,
+    end: date,
+    *,
+    addresses: Mapping[str, str],
 ) -> SyncResult:
     plugin_id = session.entry.id
     ctx.log(f"同步 {plugin_id}：{start} 至 {end}")
     ctx.progress(0.0, "检查连接")
-    connection = check_connection(session)
+    connection = check_connection(session, addresses)
     ctx.log(connection if connection is not None else "插件没有实现 check_connection，跳过")
     check_capabilities(plugin_id, session.call("capabilities"))
 
@@ -179,7 +187,7 @@ def _run(
                 dropped += zero
                 written["bars_1d"] += tx.write("bars_1d", bars)
                 written["adj_factors"] += tx.write(
-                    "adj_factors", fetch_adj_factors(session, batch, start, end)
+                    "adj_factors", fetch_adj_factors(session, batch, end)
                 )
             ctx.check_cancelled()  # 提交前最后一次检查：取消的任务不留下快照
     except SnapshotConflictError as exc:
@@ -204,8 +212,11 @@ def _run(
 # ---------------------------------------------------------------- 各步骤
 
 
-def check_connection(session: PluginSession) -> str | None:
-    """调用插件的 check_connection。没通过时抛 SyncError；插件没有实现时返回 None。"""
+def check_connection(session: PluginSession, addresses: Mapping[str, str]) -> str | None:
+    """调用插件的 check_connection。没通过时抛 SyncError；插件没有实现时返回 None。
+
+    插件给的说明会进任务日志和结果，其中用户确认的地址替换成 ``<endpoint id 的地址>``。
+    """
     try:
         status = session.call("check_connection")
     except PluginRunError as exc:
@@ -214,9 +225,17 @@ def check_connection(session: PluginSession) -> str | None:
         raise
     if not isinstance(status, ConnectionStatus):
         raise SyncError(f"check_connection 应返回 ConnectionStatus，实际为 {type(status).__name__}")
+    message = redact(status.message, addresses)
     if not status.ok:
-        raise SyncError(f"连接检查没有通过：{status.message or '插件没有给出原因'}")
-    return status.message
+        raise SyncError(f"连接检查没有通过：{message or '插件没有给出原因'}")
+    return message
+
+
+def redact(message: str, addresses: Mapping[str, str]) -> str:
+    """把用户确认的地址换成占位符：任务日志里不写具体地址。"""
+    for endpoint_id, address in sorted(addresses.items(), key=lambda kv: -len(kv[1])):
+        message = message.replace(address, f"<{endpoint_id} 的地址>")
+    return message
 
 
 def check_capabilities(plugin_id: str, caps: Any) -> Capabilities:
@@ -271,19 +290,27 @@ def fetch_bars(
         raise SyncError(f"日线不合格：{'；'.join(problems)}")
     _require_symbols("日线", df, symbols)
     _require_in_range("日线", df, start, end)
-    kept = df.filter(pl.col("volume").fill_null(0.0) != 0.0)
+    unknown = df.get_column("volume").null_count()
+    if unknown:
+        # 成交量不知道不等于 0：当成停牌丢掉会把数据源的缺陷藏起来
+        raise SyncError(f"日线有 {unknown} 行成交量为空")
+    kept = df.filter(pl.col("volume") != 0.0)
     return kept, df.height - kept.height
 
 
-def fetch_adj_factors(
-    session: PluginSession, symbols: Sequence[str], start: date, end: date
-) -> pl.DataFrame:
-    df = _frame(session.call("adj_factors", list(symbols), start, end), "adj_factors")
+def fetch_adj_factors(session: PluginSession, symbols: Sequence[str], end: date) -> pl.DataFrame:
+    """复权因子总是从 EARLIEST 请求，不管同步区间从哪天开始。
+
+    因子是累计值，第一行之前视为 1.0。只请求 [start, end] 时，start 之前最后一次除权的
+    因子拿不到，区间开头的 K 线会按 1.0 复权；插件若只用区间内的事件计算，累计值还会从
+    1 重新开始，和已入库的因子基数不一致。因子行很少，全量请求的代价可以忽略。
+    """
+    df = _frame(session.call("adj_factors", list(symbols), EARLIEST, end), "adj_factors")
     result = check_adj_factors(df)
     if not result.passed:
         raise SyncError(f"复权因子不合格：{'；'.join(result.details)}")
     _require_symbols("复权因子", df, symbols)
-    _require_in_range("复权因子", df, start, end)
+    _require_in_range("复权因子", df, EARLIEST, end)
     return df
 
 

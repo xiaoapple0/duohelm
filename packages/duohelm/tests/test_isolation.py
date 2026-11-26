@@ -694,8 +694,11 @@ def test_capabilities_roundtrip_and_unknown_freq_skipped(tmp_path: Path) -> None
     store = FrameStore(tmp_path, "t")
     caps = Capabilities(markets=("CN",), freqs=(Freq.DAY,), fields=("open",), lists_delisted=True)
     assert decode(encode(caps, store), store) == caps
+    approx = Capabilities(markets=("CN",), freqs=(Freq.DAY,), fields=(), exact_delist_date=False)
+    assert decode(encode(approx, store), store).exact_delist_date is False
     # 新版 SDK 的插件可能声明当前版本不认识的频率：跳过，不能报错
     newer = {"$capabilities": {"markets": ["CN"], "freqs": ["1d", "5s"], "fields": []}}
     decoded = decode(newer, store)
     assert decoded.freqs == (Freq.DAY,)
     assert decoded.lists_delisted is False
+    assert decoded.exact_delist_date is True  # 0.4.0 的插件不发这个字段：按 SDK 口径

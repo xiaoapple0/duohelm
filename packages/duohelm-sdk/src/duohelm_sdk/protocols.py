@@ -38,6 +38,12 @@ class Capabilities:
     为 True 时，平台调用 ``securities(include_delisted=True)`` 直接取得完整名单；
     为 False 时（数据源的代码表只有在市证券），平台用 ``lookup_securities`` 扫描代码区间。
     """
+    exact_delist_date: bool = True
+    """``delist_date`` 是否符合 SDK 口径（摘牌日之前的最后一个交易所交易日，SDK 0.4.1 起）。
+
+    数据源拿不到摘牌日、只能给出近似值（例如最后一根有成交的 K 线的日期）时设为 False。
+    平台把这个数据源给出的退市日记为近似值（数据集 ``delist_date_quality``）。
+    """
 
 
 @dataclass(frozen=True)

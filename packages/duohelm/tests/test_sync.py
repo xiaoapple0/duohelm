@@ -87,6 +87,7 @@ class Plain:
             freqs=(Freq.DAY,),
             fields=("open", "high", "low", "close", "volume", "amount"),
             lists_delisted=B.get("lists_delisted", True),
+            exact_delist_date=B.get("exact_delist_date", True),
         )
 
     def securities(self, *, include_delisted=False):
@@ -267,7 +268,37 @@ def test_sync_uses_confirmed_address_and_writes_snapshot(settings: Settings) -> 
     ]
     securities = data.read("securities")
     assert "830000.NQ" not in securities.get_column("symbol").to_list()
-    assert result.written == {"securities": 5, "calendar": 4, "bars_1d": 13, "adj_factors": 2}
+    assert result.written == {
+        "securities": 5,
+        "delist_date_quality": 5,
+        "calendar": 4,
+        "bars_1d": 13,
+        "adj_factors": 2,
+    }
+    quality = dict(data.read("delist_date_quality").rows())
+    assert quality == {
+        "000001.SH": None,
+        "000001.SZ": None,
+        "600000.SH": None,
+        "600001.SH": True,
+        "600005.SH": True,
+    }
+
+
+def test_approximate_delist_dates_are_marked(settings: Settings) -> None:
+    """数据源声明退市日是近似值：有退市日的证券记为不精确；之后精确的数据源覆盖它。"""
+    plugin = install(settings, exact_delist_date=False)
+    confirm(settings)
+    run(settings)
+    data = DataStore(settings.data_dir)
+    quality = dict(data.read("delist_date_quality").rows())
+    assert quality["600001.SH"] is False and quality["600005.SH"] is False
+    assert quality["600000.SH"] is None
+
+    behave(plugin)  # 同一只证券，换成给出精确退市日的数据
+    run(settings)
+    quality = dict(data.read("delist_date_quality").rows())
+    assert quality["600001.SH"] is True and quality["600005.SH"] is True
 
 
 def test_adj_factors_requested_from_earliest(settings: Settings) -> None:

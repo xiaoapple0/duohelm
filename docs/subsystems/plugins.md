@@ -205,6 +205,12 @@ with session_for(
 
 ### 变更记录
 
+**SDK 0.4.1（M1）**，兼容，只新增一个可选字段：
+
+- `Capabilities.exact_delist_date`（默认 True）：`delist_date` 是否符合 SDK 口径（摘牌日之前的最后一个交易所交易日）。拿不到摘牌日、只能给近似值的数据源设为 False，平台把它给出的退市日记为近似值（数据集 `delist_date_quality`，见 `data.md`）
+- 隔离协议解码时，没有这个字段（0.4.0 的插件）按 True 处理
+- 用到这个字段的插件，清单的 `sdk` 范围要从 0.4.1 起（`>=0.4.1`），否则在 0.4.0 的平台上构造 `Capabilities` 会出错
+
 **SDK 0.4.0（M1）**，不兼容，有两项：`permissions.network` 的含义收紧，0.3 下有效的清单（`network` 里写了本机或局域网地址）在 0.4 下无效；`endpoint()` 遇到没确认的 endpoint 从返回 `default` 改为报错。按“改变含义是不兼容改动”升次版本号：
 
 - `network` 只允许公网地址：解析清单时拒绝本机、私有网段、链路本地、保留地址（包括 `127.1`、`0x7f.0.0.1` 这类数字或十六进制写法），以及 `localhost`、`*.localhost`、`*.local`、`*.lan`、`*.internal`、`*.home.arpa`，报错信息提示改用 `[[permissions.endpoints]]`

@@ -41,6 +41,14 @@ class Dataset:
 
 CALENDAR_SCHEMA: dict[str, pl.DataType] = {"market": pl.String(), "date": pl.Date()}
 
+DELIST_DATE_QUALITY_SCHEMA: dict[str, pl.DataType] = {"symbol": pl.String(), "exact": pl.Boolean()}
+"""证券列表里每只证券的退市日是否精确（平台的数据集，不是插件的输出格式）。
+
+``exact`` 为 False：数据源拿不到摘牌日，``delist_date`` 是近似值（``Capabilities.
+exact_delist_date`` 为 False）；为 null：仍在市，没有退市日。和 securities 在同一个事务里
+整行写入，两者一一对应。快照里没有这个数据集的行时，是“不知道”，不是“精确”。
+"""
+
 DATASETS: dict[str, Dataset] = {
     d.name: d
     for d in (
@@ -48,6 +56,7 @@ DATASETS: dict[str, Dataset] = {
         Dataset("adj_factors", ADJ_FACTORS_SCHEMA, ("symbol", "date")),
         Dataset("securities", SECURITIES_SCHEMA, ("symbol",)),
         Dataset("calendar", CALENDAR_SCHEMA, ("market", "date")),
+        Dataset("delist_date_quality", DELIST_DATE_QUALITY_SCHEMA, ("symbol",)),
     )
 }
 

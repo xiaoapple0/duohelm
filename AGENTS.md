@@ -8,6 +8,7 @@
 |---|---|
 | 任何代码改动 | `LESSONS.md`、`PRINCIPLES.md` |
 | 写代码或审查改动 | `docs/code-standards.md` |
+| 开 PR 之前 | 用 reviewer 子代理独立审查（`.claude/agents/reviewer.md`），见下文“开 PR 之前的独立审查” |
 | 修改某个子系统 | `docs/subsystems/README.md` 及对应的子系统文档，并核对其中链接的源码 |
 | 改动插件接口、清单格式、SDK 公开 API | `docs/subsystems/plugins.md` 的"契约变更"一节，**并且需要维护者确认** |
 | 审查外部 PR、处理 issue 和反馈 | `docs/contributors.md` |
@@ -75,6 +76,7 @@ agent 可以提出建议并附上证据，但不能自行修改、关闭或撤�
 - 审查发现的问题先修，修完再审查一次，直到没有需修改的问题。修不了的，在 PR 说明里写明原因
 - 结论是“需维护者决定”的，PR 打上 `needs-maintainer` 标签，并在 PR 说明里写明需要维护者决定什么
 - 往已经开出的 PR 推送新的改动之前，同样要审查这次新增的改动
+- reviewer 只读代码，不运行测试。它是开 PR 之前的补充审查，**不替代** `docs/code-standards.md` 的验收检查（在当前 main 上跑测试、破坏验证等），也不替代维护者合并前的审查。它的“通过”不等于已经审查过
 
 ## 多会话协作
 

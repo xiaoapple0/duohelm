@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 from collections.abc import Iterator
@@ -676,7 +678,9 @@ def test_lookup_needs_hostname_in_allowlist(tmp_path: Path, how: str) -> None:
 
 @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Windows 的 Python 没有 AF_UNIX")
 def test_unix_socket_refused(tmp_path: Path) -> None:
-    path = tmp_path / "s.sock"
+    # macOS 的套接字路径最长 104 字节，pytest 的 tmp_path 太长，在 /tmp 下建短目录
+    short = Path(tempfile.mkdtemp(prefix="dh", dir="/tmp"))
+    path = short / "s.sock"
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)  # pyright: ignore[reportAttributeAccessIssue]
     server.bind(str(path))
     server.listen()
@@ -689,6 +693,7 @@ def test_unix_socket_refused(tmp_path: Path) -> None:
             s.call("compute", f"unix:{path}", DATA)
     finally:
         server.close()
+        shutil.rmtree(short, ignore_errors=True)
 
 
 @pytest.mark.skipif(not hasattr(socket.socket, "sendmsg"), reason="Windows 的 Python 没有 sendmsg")

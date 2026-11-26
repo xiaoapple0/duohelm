@@ -9,6 +9,42 @@ export interface Health {
 export type PluginStatus = "ready" | "invalid" | "incompatible" | "blocked";
 export type PluginKind = "datasource" | "operator" | "factor" | "broker";
 
+export type EndpointScope = "loopback" | "lan" | "internet";
+/** default：没有配置；confirmed：用已确认的地址；needs_confirmation：清单的 endpoints 变了，需要重新确认。 */
+export type EndpointState = "default" | "confirmed" | "needs_confirmation";
+
+export interface PluginEndpoint {
+  id: string;
+  description: string;
+  scope: EndpointScope;
+  default: string;
+  state: EndpointState;
+  configured: string | null;
+  effective: string;
+  confirmed_at: string | null;
+  /** 当前清单 endpoints 那一节的哈希，确认时原样传回 */
+  digest: string;
+}
+
+export interface EndpointConfirm {
+  address: string;
+  confirm: true;
+  confirm_internet?: boolean;
+  digest: string;
+}
+
+/** none：没有声明；approved：已确认；needs_approval：没确认过或列表变了，确认前插件不能联网。 */
+export type NetworkState = "none" | "approved" | "needs_approval";
+
+export interface PluginNetwork {
+  hosts: string[];
+  state: NetworkState;
+  approved_hosts: string[] | null;
+  approved_at: string | null;
+  /** 当前列表的哈希，确认时原样传回 */
+  digest: string;
+}
+
 export interface Plugin {
   id: string;
   status: PluginStatus;
@@ -17,6 +53,8 @@ export interface Plugin {
   kind: PluginKind | null;
   path: string;
   problems: string[];
+  network: PluginNetwork | null;
+  endpoints: PluginEndpoint[];
 }
 
 export type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -125,6 +163,18 @@ function postJson<T>(path: string, body?: unknown): Promise<T> {
   });
 }
 
+function putJson<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function deleteJson<T>(path: string): Promise<T> {
+  return request<T>(path, { method: "DELETE" });
+}
+
 function query(params: Record<string, string | number | undefined>): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -139,6 +189,22 @@ function query(params: Record<string, string | number | undefined>): string {
 export const api = {
   health: () => getJson<Health>("/api/health"),
   plugins: () => getJson<Plugin[]>("/api/plugins"),
+  approveNetwork: (pluginId: string, digest: string) =>
+    putJson<PluginNetwork>(`/api/plugins/${encodeURIComponent(pluginId)}/network`, {
+      confirm: true,
+      digest,
+    }),
+  revokeNetwork: (pluginId: string) =>
+    deleteJson<PluginNetwork>(`/api/plugins/${encodeURIComponent(pluginId)}/network`),
+  confirmEndpoint: (pluginId: string, endpointId: string, body: EndpointConfirm) =>
+    putJson<PluginEndpoint>(
+      `/api/plugins/${encodeURIComponent(pluginId)}/endpoints/${encodeURIComponent(endpointId)}`,
+      body,
+    ),
+  clearEndpoint: (pluginId: string, endpointId: string) =>
+    deleteJson<PluginEndpoint>(
+      `/api/plugins/${encodeURIComponent(pluginId)}/endpoints/${encodeURIComponent(endpointId)}`,
+    ),
   taskTypes: () => getJson<TaskTypeInfo[]>("/api/task-types"),
   tasks: (q: TaskQuery = {}) => getJson<Task[]>(`/api/tasks${query({ ...q })}`),
   task: (id: number) => getJson<Task>(`/api/tasks/${id}`),

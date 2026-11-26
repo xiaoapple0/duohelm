@@ -27,6 +27,12 @@ from typing import Any, BinaryIO, Literal, Self, cast
 import polars as pl
 import psutil
 
+from duohelm.endpoints import (
+    EndpointConfigError,
+    EndpointStore,
+    checked_addresses,
+    checked_network,
+)
 from duohelm.isolation.protocol import (
     FrameStore,
     ProtocolError,
@@ -120,6 +126,33 @@ def child_env(workdir: Path, parent: Mapping[str, str] | None = None) -> dict[st
 _EOF = object()
 
 
+def session_for(
+    entry: PluginEntry,
+    store: EndpointStore,
+    *,
+    deps: Sequence[PluginEntry] = (),
+    limits: Limits | None = None,
+    cancel: threading.Event | None = None,
+    log: Callable[[str], None] | None = None,
+) -> PluginSession:
+    """平台运行插件的入口：带上用户在插件页确认过的连接地址。
+
+    平台代码（同步任务等）应当用它，而不是直接构造 :class:`PluginSession`；直接构造时
+    不传 ``endpoints``，插件只会拿到清单的 default，而且连不上。
+    """
+    if entry.manifest is None:
+        raise PluginRunError("load", f"插件 {entry.id} 的清单无效，不能运行")
+    return PluginSession(
+        entry,
+        deps=deps,
+        limits=limits,
+        cancel=cancel,
+        log=log,
+        endpoints=store.addresses_for(entry.manifest),
+        network=store.network_for(entry.manifest),
+    )
+
+
 class PluginSession:
     """一个插件子进程。用 with 语句管理生命周期；会话内可以多次调用。
 
@@ -134,7 +167,17 @@ class PluginSession:
         limits: Limits | None = None,
         cancel: threading.Event | None = None,
         log: Callable[[str], None] | None = None,
+        endpoints: Mapping[str, str] | None = None,
+        network: Sequence[str] = (),
     ) -> None:
+        """``endpoints``：用户确认过的连接地址（endpoint id -> ``主机:端口``），通常来自
+        :meth:`duohelm.endpoints.EndpointStore.addresses_for`。只有这里的地址放行；没给的
+        endpoint，插件的 ``endpoint()`` 返回清单的 default，但不放行。启动子进程之前按
+        scope 再校验一次。
+
+        ``network``：放行的清单 network 地址，来自
+        :meth:`duohelm.endpoints.EndpointStore.network_for`（用户确认过才有）。默认为空，
+        即不放行清单的 network；必须是清单 network 的子集。"""
         if entry.status is not PluginStatus.READY or entry.manifest is None:
             raise PluginRunError("load", f"插件 {entry.id} 的状态是 {entry.status}，不能运行")
         info = entry.manifest.plugin
@@ -149,6 +192,9 @@ class PluginSession:
         self._log: Callable[[str], None] = log or self._default_log
         self._kind = info.kind
         self._entrypoint = info.entrypoint
+        self._manifest = entry.manifest
+        self._endpoint_texts: dict[str, str] = dict(endpoints or {})
+        self._network = list(network)
 
         self.workdir: Path | None = None
         self._proc: subprocess.Popen[bytes] | None = None
@@ -194,6 +240,14 @@ class PluginSession:
         return self._interpreter_pid
 
     def start(self) -> None:
+        # 第二次校验：启动子进程、传地址之前，按清单里的 scope 再校验一次。
+        try:
+            addresses = checked_addresses(self._manifest, self._endpoint_texts)
+            approved = checked_network(self._manifest, self._network)
+        except EndpointConfigError as exc:
+            raise PluginRunError("load", str(exc)) from None
+        # 只放行用户确认过的地址：没确认的 endpoint（用 default 的）不进白名单
+        network = [*approved, *(str(addresses[k]) for k in self._endpoint_texts)]
         workdir = Path(tempfile.mkdtemp(prefix="duohelm-plugin-"))
         self.workdir = workdir
         self._inputs = FrameStore(workdir, "in")
@@ -251,6 +305,8 @@ class PluginSession:
                 "sys_path": [str(e.path) for e in (self.entry, *self.deps)],
                 "entrypoint": self._entrypoint,
                 "kind": self._kind,
+                "network": network,
+                "endpoints": {k: {"host": a.host, "port": a.port} for k, a in addresses.items()},
             }
         )
         started = self._receive(self.limits.startup_timeout_s)

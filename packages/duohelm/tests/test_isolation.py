@@ -125,7 +125,7 @@ id = "{plugin_id}"
 name = "{plugin_id}"
 version = "1.0.0"
 kind = "factor"
-sdk = ">=0.3,<0.4"
+sdk = ">=0.4,<0.5"
 entrypoint = "{module}:plugin"
 
 [[factors]]
@@ -633,7 +633,7 @@ id = "iso-source"
 name = "iso-source"
 version = "1.0.0"
 kind = "datasource"
-sdk = ">=0.3,<0.4"
+sdk = ">=0.4,<0.5"
 entrypoint = "iso_source:plugin"
 """
 

@@ -4,10 +4,12 @@
 
 1. 复制 fd 1 留给协议，把 fd 1 重定向到 stderr，插件的 print 和原生库输出都不会
    混进协议数据
-2. 安装网络拦截
+2. 安装网络拦截（此时白名单为空，什么都不放行）
 3. 发送 ``ready``，等父进程完成资源限制设置（Windows 上把进程加入 Job）后发 ``start``
-4. 把插件及其依赖的目录加入 ``sys.path``，按 entrypoint 加载插件对象
-5. 循环处理 ``call``，直到收到 ``close`` 或 stdin 关闭
+4. 按 ``start`` 里的白名单重新安装网络拦截，设置插件能取到的 endpoint 地址
+   （:func:`duohelm_sdk.context.endpoint`）
+5. 把插件及其依赖的目录加入 ``sys.path``，按 entrypoint 加载插件对象
+6. 循环处理 ``call``，直到收到 ``close`` 或 stdin 关闭
 """
 
 from __future__ import annotations
@@ -28,7 +30,8 @@ from duohelm.isolation.protocol import (
     read_message,
     write_message,
 )
-from duohelm_sdk import DataSourcePlugin, FactorPlugin
+from duohelm_sdk import Address, DataSourcePlugin, FactorPlugin
+from duohelm_sdk import context as sdk_context
 
 ALLOWED_METHODS: dict[str, frozenset[str]] = {
     "factor": frozenset({"compute"}),
@@ -41,6 +44,7 @@ ALLOWED_METHODS: dict[str, frozenset[str]] = {
             "bars",
             "adj_factors",
             "index_constituents",
+            "check_connection",
         }
     ),
 }
@@ -62,6 +66,15 @@ def _error(kind: str, exc: BaseException) -> dict[str, Any]:
         "message": f"{type(exc).__name__}: {exc}",
         "traceback": "".join(traceback.format_exception(exc)),
     }
+
+
+def _apply_permissions(start: dict[str, Any]) -> None:
+    """按父进程给的白名单放行网络，设置 endpoint 地址。必须在导入插件代码之前调用。"""
+    netguard.set_allowlist([str(item) for item in start.get("network", [])])
+    endpoints: dict[str, Any] = start.get("endpoints", {})
+    sdk_context._install(  # pyright: ignore[reportPrivateUsage]  平台专用的入口
+        {str(k): Address(str(v["host"]), int(v["port"])) for k, v in endpoints.items()}
+    )
 
 
 def _load(start: dict[str, Any]) -> Any:
@@ -89,6 +102,7 @@ def serve(proto_in: BinaryIO, proto_out: BinaryIO) -> int:
     inputs = FrameStore(Path(str(start["workdir"])), "in")
     allowed = ALLOWED_METHODS.get(str(start["kind"]), frozenset())
     try:
+        _apply_permissions(start)
         plugin = _load(start)
     except MemoryError as exc:
         write_message(proto_out, _error("memory", exc))

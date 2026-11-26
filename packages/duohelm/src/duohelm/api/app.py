@@ -11,12 +11,15 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from duohelm import __version__
+from duohelm.api.plugins import plugin_router
+from duohelm.api.security import install_origin_guard
 from duohelm.api.tasks import task_router
-from duohelm.registry import PluginEntry, PluginRegistry, PluginStatus
+from duohelm.endpoints import EndpointStore
+from duohelm.registry import PluginRegistry
 from duohelm.settings import Settings
 from duohelm.tasks import TaskStore, TaskTypeRegistry, Worker
 from duohelm.tasks.builtin import builtin_task_types
-from duohelm_sdk import SDK_VERSION, PluginKind
+from duohelm_sdk import SDK_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -29,29 +32,6 @@ class HealthResponse(BaseModel):
     sdk_version: str
 
 
-class PluginOut(BaseModel):
-    id: str
-    status: PluginStatus
-    name: str | None
-    version: str | None
-    kind: PluginKind | None
-    path: str
-    problems: list[str]
-
-    @classmethod
-    def from_entry(cls, entry: PluginEntry) -> PluginOut:
-        info = entry.manifest.plugin if entry.manifest else None
-        return cls(
-            id=entry.id,
-            status=entry.status,
-            name=info.name if info else None,
-            version=info.version if info else None,
-            kind=info.kind if info else None,
-            path=str(entry.path),
-            problems=list(entry.problems),
-        )
-
-
 def create_app(settings: Settings | None = None, *, run_workers: bool = False) -> FastAPI:
     """run_workers=True 时在应用生命周期内启动后台 worker 线程（duohelm serve 使用）。
 
@@ -60,6 +40,7 @@ def create_app(settings: Settings | None = None, *, run_workers: bool = False) -
     settings = settings or Settings.from_env()
     registry = PluginRegistry([settings.plugin_dir])
     store = TaskStore(settings.db_path)
+    endpoints = EndpointStore(settings.plugin_config_path)
     task_types = TaskTypeRegistry(builtin_task_types(settings))
 
     @asynccontextmanager
@@ -90,14 +71,12 @@ def create_app(settings: Settings | None = None, *, run_workers: bool = False) -
                     logger.warning("%s 在 %s 秒内没有结束，强制退出", t.name, SHUTDOWN_TIMEOUT_S)
 
     app = FastAPI(title="DuoHelm", version=__version__, lifespan=lifespan)
+    install_origin_guard(app, settings)
     app.include_router(task_router(store, task_types))
+    app.include_router(plugin_router(registry, endpoints))
 
     def health() -> HealthResponse:
         return HealthResponse(status="ok", version=__version__, sdk_version=SDK_VERSION)
 
-    def list_plugins() -> list[PluginOut]:
-        return [PluginOut.from_entry(e) for e in registry.scan()]
-
     app.add_api_route("/api/health", health, methods=["GET"], response_model=HealthResponse)
-    app.add_api_route("/api/plugins", list_plugins, methods=["GET"], response_model=list[PluginOut])
     return app

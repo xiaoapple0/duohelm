@@ -153,3 +153,51 @@ def test_load_manifest_missing_file(tmp_path: Path) -> None:
     with pytest.raises(ManifestError) as info:
         load_manifest(tmp_path)
     assert "无法读取" in info.value.message
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.1",
+        "127.0.0.1:58610",
+        "10.0.0.2",
+        "172.16.5.4:80",
+        "192.168.31.5:58610",
+        "169.254.1.1",
+        "100.64.0.1",
+        "0.0.0.0:80",
+        "224.0.0.1",
+        "203.0.113.7",  # 文档保留地址
+        "localhost",
+        "localhost:8080",
+        "nas.local",
+        "router.lan",
+        "db.internal",
+        "app.localhost",
+        "printer.home.arpa",
+        "127.1",  # 不规范的 IP 写法，系统会解析成 127.0.0.1
+        "2130706433",
+        "0x7f.0.0.1",
+        "0x7f000001:80",
+        "10.1",
+    ],
+)
+def test_network_rejects_local_and_private(host: str) -> None:
+    """SDK 0.4：network 只允许公网地址，本机和局域网的服务走 endpoints。"""
+    message = _error(
+        DATASOURCE_PLUGIN.replace(
+            'network = ["api.example.com", "data.example.com:8443"]', f'network = ["{host}"]'
+        )
+    )
+    assert "公网" in message and "endpoints" in message
+    assert host.split(":", maxsplit=1)[0] in message
+
+
+@pytest.mark.parametrize(
+    "host", ["8.8.8.8", "1.1.1.1:443", "api.example.com", "tdx.example.net:7709"]
+)
+def test_network_accepts_public(host: str) -> None:
+    text = DATASOURCE_PLUGIN.replace(
+        'network = ["api.example.com", "data.example.com:8443"]', f'network = ["{host}"]'
+    )
+    assert parse_manifest(text).permissions.network == (host,)

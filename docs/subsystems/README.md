@@ -16,6 +16,10 @@
 - 所有功能先在核心库实现，再由 FastAPI 暴露，Web 只调 API。
 - API 路径统一以 `/api/` 开头。
 - 默认只监听 `127.0.0.1`。现阶段没有登录，**不得**默认监听 `0.0.0.0`。
+- 来源校验（`duohelm.api.security`，对整个 API 生效）：
+  - Host 头只接受 `127.0.0.1:<端口>`、`localhost:<端口>` 和 `[::1]:<端口>`，端口是 API 的端口或 Web 开发服务器的端口（`DUOHELM_WEB_PORT`，默认 5173），否则返回 400。防的是 DNS 重绑定：恶意网页把自己的域名解析到 127.0.0.1 时，浏览器发来的 Host 仍是那个域名
+  - POST、PUT、PATCH、DELETE 带了 Origin 头时，必须是平台自己的来源（`http://` 加上面接受的 Host），否则返回 403。浏览器跨站发出的写请求都会带 Origin，所以恶意网页过不了这一关；`Origin: null` 和空的 Origin 也拒绝。不带 Origin 的写请求（命令行脚本、curl）放行，Host 校验已经限定只能从本机访问
+  - 监听非本机地址时，局域网里的访问会因为 Host 不对被拒绝
 - 前端开发时由 Vite 代理 `/api` 到后端（见 `web/vite.config.ts`）。
 - 前端的接口类型将从 OpenAPI 生成（M1 引入），之前手写的类型只放在 `web/src/api/` 一处。
 

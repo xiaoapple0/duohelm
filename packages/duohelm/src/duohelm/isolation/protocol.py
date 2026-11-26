@@ -21,7 +21,7 @@ from typing import Any, BinaryIO, cast
 
 import polars as pl
 
-from duohelm_sdk import Capabilities, Freq
+from duohelm_sdk import Capabilities, ConnectionStatus, Freq
 
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 _HEADER = struct.Struct(">I")
@@ -121,6 +121,8 @@ def encode(value: object, frames: FrameStore) -> Any:  # noqa: PLR0911  按类�
                 "lists_delisted": value.lists_delisted,
             }
         }
+    if isinstance(value, ConnectionStatus):
+        return {"$connection_status": {"ok": bool(value.ok), "message": str(value.message)}}
     if isinstance(value, list | tuple):
         return [encode(v, frames) for v in cast(list[object] | tuple[object, ...], value)]
     if isinstance(value, dict):
@@ -133,7 +135,7 @@ def encode(value: object, frames: FrameStore) -> Any:  # noqa: PLR0911  按类�
     raise ProtocolError(f"不支持跨进程传递的类型：{type(value).__name__}")
 
 
-def decode(value: Any, frames: FrameStore) -> Any:
+def decode(value: Any, frames: FrameStore) -> Any:  # noqa: PLR0911  按类型分派
     if isinstance(value, list):
         return [decode(v, frames) for v in cast(list[Any], value)]
     if not isinstance(value, dict):
@@ -153,4 +155,7 @@ def decode(value: Any, frames: FrameStore) -> Any:
             fields=tuple(cast(list[str], caps["fields"])),
             lists_delisted=bool(caps.get("lists_delisted", False)),
         )
+    if "$connection_status" in obj:
+        status = cast(dict[str, Any], obj["$connection_status"])
+        return ConnectionStatus(ok=bool(status["ok"]), message=str(status.get("message", "")))
     return {k: decode(v, frames) for k, v in obj.items()}

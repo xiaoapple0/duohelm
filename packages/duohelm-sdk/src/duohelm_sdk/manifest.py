@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import tomllib
 from enum import StrEnum
@@ -31,6 +32,28 @@ _PLUGIN_ID = r"^[a-z][a-z0-9-]{0,63}$"
 _FACTOR_ID = r"^[a-z][a-z0-9_]{0,63}$"
 _ENTRYPOINT = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_]\w*$")
 _HOST = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:\d{1,5})?$")
+_LOCAL_NAMES = ("localhost",)
+_LOCAL_SUFFIXES = (".localhost", ".local", ".lan", ".internal", ".home.arpa")
+"""明显指向本机或局域网的主机名。network 只允许公网地址，这些名字直接拒绝；其他主机名在
+运行时由平台按实际解析出的 IP 检查（解析到本机或私有网段时拦截）。"""
+
+
+def _network_host_problem(entry: str) -> str | None:
+    """network 里的一项不是公网地址时，返回原因。"""
+    host = entry.rsplit(":", 1)[0] if ":" in entry else entry
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        if host in _LOCAL_NAMES or host.endswith(_LOCAL_SUFFIXES):
+            return f"{entry!r} 指向本机或局域网"
+        labels = host.split(".")
+        if labels[-1].isdigit() or any(label.startswith("0x") for label in labels):
+            # 127.1、2130706433、0x7f.0.0.1 这类写法会被系统解析成 IP，绕过上面的检查
+            return f"{entry!r} 是不规范的 IP 写法（只接受标准的点分十进制 IP 或主机名）"
+        return None
+    if not ip.is_global or ip.is_multicast:
+        return f"{entry!r} 不是公网地址（本机、私有网段、链路本地、保留地址都不行）"
+    return None
 
 
 class PluginKind(StrEnum):
@@ -88,7 +111,7 @@ class PluginInfo(_Model):
     @classmethod
     def _check_sdk(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("必须声明兼容的 SDK 版本范围，例如 '>=0.3,<0.4'")
+            raise ValueError("必须声明兼容的 SDK 版本范围，例如 '>=0.4,<0.5'")
         return _validate_spec(value)
 
     @field_validator("entrypoint")
@@ -123,7 +146,11 @@ class Endpoint(_Model):
 
 class Permissions(_Model):
     network: tuple[str, ...] = ()
-    """插件需要访问的主机名（可带端口）。不允许协议、路径和通配符。"""
+    """插件需要访问的公网主机名或公网 IP（可带端口）。不允许协议、路径和通配符。
+
+    SDK 0.4 起只允许公网地址：本机、私有网段等地址在解析清单时拒绝，需要连接本机或
+    局域网服务的插件改用 ``endpoints``（由用户填写并确认地址）。整个列表由用户在平台里确认
+    一次后才放行，列表变了需要重新确认。"""
     endpoints: tuple[Endpoint, ...] = ()
     """用户可配置的连接地址（SDK 0.3 起）。这一节变了（不含清单的其他部分），用户需要重新确认。"""
 
@@ -141,6 +168,12 @@ class Permissions(_Model):
         for host in value:
             if not _HOST.fullmatch(host):
                 raise ValueError(f"主机名格式不对（只写主机名，不带协议和路径）: {host!r}")
+            problem = _network_host_problem(host)
+            if problem is not None:
+                raise ValueError(
+                    f"network 只允许公网地址：{problem}。本机或局域网的服务请改用 "
+                    "[[permissions.endpoints]]"
+                )
         if len(set(value)) != len(value):
             raise ValueError("network 中有重复的主机名")
         return value

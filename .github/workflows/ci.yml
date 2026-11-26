@@ -37,6 +37,26 @@ jobs:
       - name: Pytest
         run: uv run pytest -rs
 
+  # 在非东八区时区下再跑一遍测试：行情日期必须由时间戳按 Asia/Shanghai 换算，
+  # 不能依赖本机时区（xtdata 的日期字符串在美东时区下会早一天，见 LESSONS.md）。
+  python-timezone:
+    name: Python (ubuntu-latest, TZ=America/New_York)
+    runs-on: ubuntu-latest
+    env:
+      TZ: America/New_York
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: uv sync
+      - name: Check time zone
+        # 确认时区真的生效：美东是 -0500（冬令时）或 -0400（夏令时）
+        run: uv run python -c "import time; z = time.strftime('%z'); print(z); assert z in ('-0500', '-0400'), z"
+      - name: Pytest
+        run: uv run pytest -rs
+
   web:
     name: Web
     runs-on: ubuntu-latest

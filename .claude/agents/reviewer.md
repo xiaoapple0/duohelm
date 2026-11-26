@@ -26,10 +26,10 @@ tools: Read, Grep, Glob
 - `git diff <merge-base>...HEAD --stat` 和完整的 `git diff`
 - 改动文件的大小（字节）
 - `git ls-files -i -c --exclude-standard`（被跟踪却应被忽略的文件）
-- 已有 PR 时 `gh pr view <分支> --json number,state,mergedAt`
-- diff 改动了 `.github/` 时，`gh api repos/xiaoapple0/duohelm/rules/branches/main` 的必需检查
+- PR 状态：`gh pr view <分支> --json number,state,mergedAt`；还没有开 PR 时写“没有 PR”，这是正常结果
+- 必需检查：diff 改动了 `.github/` 时是 `gh api repos/xiaoapple0/duohelm/rules/branches/main` 的输出，没有改动时写“未运行：diff 没有改动 .github/”，这是正常结果
 
-某一节写着“报错”或“未运行”、或者整节缺失时，把对应的检查项写进“没能检查的项”，不要自己推断结果。小节标题里写了“为空表示……”的，为空才是正常结果。
+每一节都会输出。某一节写着“报错”、写着“未运行”（上面说明是正常结果的除外）、或者整节缺失时，把对应的检查项写进“没能检查的项”，不要自己推断结果。小节标题里写了“为空表示……”的，为空才是正常结果。命令成功时材料里只有标准输出，提示和警告已经丢弃。
 
 ## 检查项
 

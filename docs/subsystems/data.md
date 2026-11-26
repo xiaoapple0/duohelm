@@ -46,6 +46,8 @@
 
 `delist_date` 按交易日历取摘牌日之前的最后一个交易日，**不是**这只证券最后一根 K 线的日期。退市前停牌的证券（如中国北车：2015 年停牌后换股吸收合并），退市日晚于最后一根 K 线，中间的日子是停牌、不能成交。
 
+拿不到摘牌日的数据源（如 eltdx）在 `Capabilities.exact_delist_date` 里声明为 False（SDK 0.4.1 起），给出的退市日是近似值。平台在数据集 `delist_date_quality` 里逐只记下退市日是否精确，见[存储](#存储m1)下的数据集表。
+
 `exchange` 和 `kind` 以后可能新增取值：使用方遇到不认识的取值要跳过这一行，不能报错（`schema.known_securities()`）。
 
 能直接列出退市证券的数据源（如 xtdata）在 `Capabilities.lists_delisted` 中声明，平台直接取完整名单；不能的（如 eltdx），平台用 `lookup_securities` 扫描代码区间。
@@ -133,6 +135,11 @@ data/
 | `adj_factors` | `ADJ_FACTORS_SCHEMA` | symbol、date | 不分区 |
 | `securities` | `SECURITIES_SCHEMA` | symbol | 不分区 |
 | `calendar` | market、date | market、date | 不分区 |
+| `delist_date_quality` | symbol、exact | symbol | 不分区 |
+
+`delist_date_quality` 是平台自己的数据集，不是插件的输出格式。每只证券一行，和 `securities` 在同一个事务里写入：`exact` 为 True 表示退市日精确，为 False 表示近似值（数据源的 `exact_delist_date` 为 False），为 null 表示仍在市。快照里没有某只证券的行（例如 SDK 0.4.1 之前同步的快照），表示“不知道”，不能当成精确。
+
+读取规则：拿 `securities` 左连接这个数据集时，“没有行”和“仍在市”都得到 null，要靠 `delist_date` 区分。**`delist_date` 不为空且 `exact` 为 True，才算精确**；`delist_date` 不为空而 `exact` 为 null，是“不知道”。True 只表示数据源没有声明是近似值：还没升级到 SDK 0.4.1 的插件同步出的行也是 True。eltdx 升级前同步过的，升级后再同步一次就会改为 False（扫描路径每次都会重新查询全部退市股）
 
 ### 只新增文件
 
@@ -200,7 +207,7 @@ data/
    - 日线用 `BARS_SCHEMA` 检查格式，复权因子用 `check_adj_factors` 检查；出现没有请求的证券、或日期不在请求的区间内，任务失败
    - **丢弃成交量为 0 的行**（停牌占位 K 线），结果里记丢弃的行数。“某个交易日没有这一行”即表示当天不可交易
    - **成交量为空时任务失败**：空是“不知道”，不能当成 0 按停牌丢掉
-7. 证券列表、日历、日线、复权因子在**一个事务**里写入，提交为一个快照，快照记下任务 id。数据没有变化时不产生新快照（`snapshot_id` 为空）
+7. 证券列表、退市日精确与否（`delist_date_quality`）、日历、日线、复权因子在**一个事务**里写入，提交为一个快照，快照记下任务 id。数据没有变化时不产生新快照（`snapshot_id` 为空）
 
 出错时：
 
@@ -223,7 +230,7 @@ data/
 ## 已知缺口
 
 - 存储、快照和同步任务已实现。入库时只做格式和范围检查，并丢弃停牌占位行；质量报告（#31）、交叉核对（#32）还没有做
-- **eltdx 的退市日**：取的是最后一根 K 线的日期，不是摘牌日之前的最后一个交易日；退市前长期停牌的证券，退市日会被写早（xiaoapple0/duohelm-plugins#7）
+- **eltdx 的退市日是近似值**：eltdx 拿不到摘牌日（退市 K 线、F10 基础信息和发行上市信息、公告列表都试过），只能给出最后一根有成交的 K 线的日期，是 SDK 口径的下界；退市前长期停牌的证券会偏早。同步时记为近似值（`delist_date_quality.exact` 为 False，xiaoapple0/duohelm-plugins#7）。用 xtdata 的摘牌日修正属于交叉核对（#32），近似值在质量报告里的展示属于 #31。回测怎样处理近似的退市日，在设计回测成交规则时决定
 - **退市股扫描的缺口**（`lists_delisted` 为 False 的数据源，如 eltdx）：
   - 北交所 43、83、87 开头的旧代码和 B 股不扫，这些代码上的退市股发现不了（#35）
   - 两次同步之间上市又退市的股票：它从没出现在代码表里，而它的代码之前已经记为“没找到”，不会再查（#36）

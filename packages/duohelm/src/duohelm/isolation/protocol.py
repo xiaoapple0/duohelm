@@ -119,6 +119,7 @@ def encode(value: object, frames: FrameStore) -> Any:  # noqa: PLR0911  按类�
                 "freqs": [str(f) for f in value.freqs],
                 "fields": list(value.fields),
                 "lists_delisted": value.lists_delisted,
+                "exact_delist_date": value.exact_delist_date,
             }
         }
     if isinstance(value, ConnectionStatus):
@@ -154,6 +155,7 @@ def decode(value: Any, frames: FrameStore) -> Any:  # noqa: PLR0911  按类型�
             freqs=tuple(Freq(f) for f in cast(list[str], caps["freqs"]) if f in known_freqs),
             fields=tuple(cast(list[str], caps["fields"])),
             lists_delisted=bool(caps.get("lists_delisted", False)),
+            exact_delist_date=bool(caps.get("exact_delist_date", True)),
         )
     if "$connection_status" in obj:
         status = cast(dict[str, Any], obj["$connection_status"])

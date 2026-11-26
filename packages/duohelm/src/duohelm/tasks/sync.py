@@ -209,7 +209,15 @@ def _run(
         f"交易日 {calendar.height} 天"
     )
 
-    written = {"securities": 0, "calendar": 0, "bars_1d": 0, "adj_factors": 0}
+    written = {
+        "securities": 0,
+        "delist_date_quality": 0,
+        "calendar": 0,
+        "bars_1d": 0,
+        "adj_factors": 0,
+    }
+    if not caps.exact_delist_date:
+        ctx.log(f"插件 {plugin_id} 的退市日是近似值，记进 delist_date_quality")
     dropped = 0
     batches = [symbols[i : i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
     try:
@@ -217,6 +225,9 @@ def _run(
             task_id=ctx.task_id, note=f"data.sync {plugin_id} {start}..{end}"
         ) as tx:
             written["securities"] = tx.write("securities", securities)
+            written["delist_date_quality"] = tx.write(
+                "delist_date_quality", delist_date_quality(securities, caps)
+            )
             written["calendar"] = tx.write("calendar", calendar)
             for i, batch in enumerate(batches):
                 ctx.progress(
@@ -278,6 +289,16 @@ def redact(message: str, addresses: Mapping[str, str]) -> str:
     for endpoint_id, address in sorted(addresses.items(), key=lambda kv: -len(kv[1])):
         message = message.replace(address, f"<{endpoint_id} 的地址>")
     return message
+
+
+def delist_date_quality(securities: pl.DataFrame, caps: Capabilities) -> pl.DataFrame:
+    """每只证券一行：有退市日的按数据源的声明记精确或近似，仍在市的为 null。"""
+    return securities.select(
+        "symbol",
+        exact=pl.when(pl.col("delist_date").is_not_null())
+        .then(pl.lit(caps.exact_delist_date))
+        .otherwise(pl.lit(None, dtype=pl.Boolean())),
+    )
 
 
 def check_capabilities(plugin_id: str, caps: Any) -> Capabilities:

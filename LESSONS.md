@@ -34,6 +34,7 @@
 - 2026-11-25：xtdata 实测发现日期字符串按本机时区格式化，在美东时区下整体早一天；按时间戳换算后正确（做对了）
 - 2026-11-25：#15 合并后又往它的分支推送了 cd232d8，改动没有进 main
 - 2026-11-26：Claude 桌面应用（MSIX）把写入 %APPDATA% 的内容重定向到私有目录，uv sync 失败，被误判为沙箱拦截
+- 2026-11-26：Windows 上 asyncio 的 Proactor 绕过了插件的网络拦截，读代码推断出来、实测确认
 
 ## 已发现的教训
 
@@ -50,6 +51,14 @@
 - 原因：Claude 桌面应用是 MSIX 包。它启动的进程（包括 agent 运行的命令）写入 %APPDATA% 的内容，会被重定向到 `%LOCALAPPDATA%\Packages\AnthropicPBC.Claude_*\LocalCache\Roaming`。在应用外面看不到这些内容；有些工具在应用里面也会出错，比如 uv 检查目录联接时，看到的是未经重定向的路径。报错表面上像是文件缺失或权限问题，容易被误判。
 - 怎么做：工具的安装目录、缓存、需要长期保留的数据，用环境变量或参数指到用户主目录下（例如 `UV_PYTHON_INSTALL_DIR=C:\Users\<用户>\.uv-python`）。看到 %APPDATA% 下的路径报“不存在”，先用 PowerShell 的 `Get-Item -Force <路径> | Select-Object Target` 查看它实际被重定向到了哪里。
 - 证据：2026-11-26 #19：uv 把 Python 3.12.16 装在 `%APPDATA%\uv\python`，实际被重定向到了应用的私有目录；uv 建的 `cpython-3.12` 目录联接找不到目标，`uv sync` 报 “Missing expected target directory for Python minor version link”。agent 当成沙箱拦截停了下来。维护者设置用户级环境变量 `UV_PYTHON_INSTALL_DIR` 指向用户主目录后，两个仓库的 `uv sync` 和全量测试都恢复正常。
+- 出现次数：1（2026-11-26）
+
+### 插件隔离与安全
+
+**网络拦截要覆盖所有发起连接的路径（socket、asyncio、子进程），并用实测验证，不能只看代码。**
+- 原因：同一件事在 Python 里有多条路径：`socket.connect`、`create_connection`、地址解析、UDP 的 `sendto`、asyncio 的事件循环、插件自己启动的子进程。只替换其中几个入口，其余路径照样能连出去，而且读代码时很难发现，因为它们藏在标准库内部。Windows 上 asyncio 默认的 Proactor 事件循环用 `ConnectEx` 直接连接，不经过 `socket.connect`。
+- 怎么做：每改一次拦截，就在子进程里实际走一遍每条路径，放行和拒绝两个方向都要断言，并用监听端是否收到连接来确认（不只看有没有抛异常）。拦截不了的路径（原生扩展、子进程）写进威胁模型并开 issue。
+- 证据：2026-11-26 #25：netguard 只替换了 `socket` 模块的入口。独立审查读代码推断 Windows 上的 asyncio 能绕过；实测在拦截安装后 `asyncio.open_connection("127.0.0.1", port)` 仍连上了监听端，main 上也是如此。修复为同时拦截 `IocpProactor.connect` 和 `sendto`，并加了子进程测试。插件启动的子进程仍不受拦截，记在威胁模型里（#7）。
 - 出现次数：1（2026-11-26）
 
 ### CI 与仓库设置

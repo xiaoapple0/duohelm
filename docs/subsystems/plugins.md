@@ -37,8 +37,8 @@ description = "量价类自有因子"
 entrypoint = "my_factors:plugin"   # 代码式插件的入口：模块:对象。纯表达式因子插件可省略
 
 [permissions]
-network = []                 # 需要访问的主机名。默认没有网络
-# 需要用户配置地址的服务另用 [[permissions.endpoints]]，见下文
+network = []                 # 需要访问的公网主机名或公网 IP（SDK 0.3.1 起只允许公网）。默认没有网络
+# 本机或局域网的服务（如 MiniQMT）用 [[permissions.endpoints]]，见下文
 
 [[requires]]                 # 依赖的其他插件
 id = "ops-industry"
@@ -55,6 +55,16 @@ description = "价格和成交量排名的10日相关系数取反"
 ```
 
 清单的权威定义是 `packages/duohelm-sdk/src/duohelm_sdk/manifest.py`。选用 TOML 是因为 Python 标准库自带解析器，SDK 不需要额外依赖。
+
+### 联网地址 `permissions.network`（SDK 0.3.1 起只允许公网）
+
+`network` 列出插件要连接的**公网**主机名或公网 IP，可以带端口（`api.example.com`、`1.2.3.4:443`）。
+
+- 解析清单时拒绝本机、私有网段、链路本地、保留地址（`127.0.0.1`、`10.x`、`172.16–31.x`、`192.168.x`、`169.254.x`、`100.64/10`、文档保留地址等），以及 `localhost`、`*.localhost`、`*.local`、`*.lan`、`*.internal`、`*.home.arpa`。本机或局域网的服务用下面的 endpoints，由用户填写并确认地址
+- **整个列表由用户确认一次**才放行：Web 插件页显示地址数量和完整列表，用户点“确认放行”（API：`PUT /api/plugins/{id}/network`，`confirm` 必须为 true）。**确认之前插件不能联网**
+- 列表的哈希（`network_digest`，排序后计算，顺序不同不算变化）变了需要重新确认，页面列出新增和去掉的地址，重新确认之前插件不能联网。插件升版本、改 endpoints 不影响 network 的确认
+- 用户可以撤销确认（`DELETE /api/plugins/{id}/network`），撤销后插件不能联网
+- 运行时，netguard 按**实际解析出的 IP** 检查：`network` 里的主机名解析到本机或私有网段（哪怕只有一个地址）就拦截，防止公网域名指向内网
 
 ### 用户可配置的连接地址（SDK 0.3 起）
 
@@ -89,8 +99,8 @@ scope 规则（`duohelm_sdk.endpoints.parse_address`）：
   - **启动插件子进程、传地址之前**：`PluginSession.start` 调用 `checked_addresses`，不合格时不启动子进程，报 `load` 错误。错误信息会进任务日志，只写 endpoint 和 scope，不写地址
 - 平台代码运行插件时用 `duohelm.isolation.session_for(entry, store)`，它从 `EndpointStore` 取出确认过的地址传给 `PluginSession`。直接构造 `PluginSession` 而不传 `endpoints` 时，插件只拿到 `default`。**目前还没有平台代码运行插件**，同步任务（M1）是第一个调用方，接入时必须用 `session_for`（#24）
 - 需要重新确认的情况：清单里 `[[permissions.endpoints]]` 这一节变了。按这一节规范化 JSON 的 sha256 判断（`endpoints_digest`），插件升版本、改插件名称或说明、改 `network` 等清单其他部分的改动都不算；endpoint 自己的 `description`、`default`、`scope` 变了算。需要重新确认时，页面显示“需要重新确认”，插件拿到的是 `default`，已保存的地址在用户重新确认之前不使用
-- 每次确认、清除都记进审计表 `endpoint_audit`（旧地址、新地址、当时的哈希、时间），只在本机数据库里。普通日志、质量报告和任务日志里不写具体地址
-- 子进程收到 `start` 后、导入插件代码之前，按“清单的 `network` + 传给插件的 endpoint 地址”设置网络白名单，并设置 `duohelm_sdk.endpoint()` 能取到的地址。白名单逐个精确匹配主机和端口；白名单里的主机名解析出来的 IP，按主机名那一项的端口规则放行。原生扩展（如 xtquant）不经过这层拦截，靠的是平台只把确认过的地址传给插件（威胁模型见下）
+- endpoint 的确认、清除和 network 的确认、撤销，都记进审计表 `permission_audit`（对象、旧值、新值、当时的哈希、时间），只在本机数据库里。普通日志、质量报告和任务日志里不写具体地址
+- 子进程收到 `start` 后、导入插件代码之前，按“**用户确认过的** `network` + 传给插件的 endpoint 地址”设置网络白名单（`session_for` 从 `EndpointStore.network_for` 取 network，没确认时为空；直接构造 `PluginSession` 不传 `network` 时也为空；传入的 network 必须是清单的子集），并设置 `duohelm_sdk.endpoint()` 能取到的地址。白名单逐个精确匹配主机和端口；白名单里的主机名必须解析到公网 IP，解析出来的公网 IP 按主机名那一项的端口规则放行。原生扩展（如 xtquant）和插件启动的子进程不经过这层拦截，靠的是平台只把确认过的地址传给插件（威胁模型见下）
 - 实现了 `check_connection` 的插件，平台可以在隔离进程里调用它（同步任务里接入）
 
 ## 加载流程
@@ -140,7 +150,7 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
 | 结束进程树 | Windows 用 Job Object，进程以挂起状态启动、加入 Job 后再恢复，venv 启动器之后启动的解释器和插件启动的所有进程都在 Job 里；加入 Job 失败时不恢复，直接结束这个挂起的进程并报错；POSIX 用独立的进程组，外加 psutil 找到的子进程 | POSIX 上调用 `setsid` 脱离进程组、并且在结束时已经找不到的孙进程 |
 | 内存 | 整棵进程树 2 GiB（`DUOHELM_PLUGIN_MEMORY_MB`）。Windows 是 Job Object 硬限制；所有平台的父进程每 0.5 秒检查一次 RSS，超限就结束 | Linux 和 macOS 上两次检查之间的瞬时峰值 |
 | 环境变量 | 只继承白名单里的系统变量；`HOME`、`TEMP` 等指向会话临时目录。`DUOHELM_*`、代理设置和一切凭据都不传 | — |
-| 网络 | **Python 层**拦截：替换 `socket` 模块里的连接、解析和发送入口，只放行清单的 `permissions.network` 和传给插件的 endpoint 地址（逐个匹配主机和端口）；反向解析、Unix 套接字、`sendmsg` 一律拒绝 | 原生扩展、ctypes、厂商 DLL / so 直接调用系统接口（如 xtquant 连接 MiniQMT） |
+| 网络 | **Python 层**拦截：替换 `socket` 模块里的连接、解析和发送入口，以及 Windows 上 asyncio Proactor 的连接和 UDP 发送；只放行用户确认过的 `permissions.network` 和传给插件的 endpoint 地址（逐个匹配主机和端口），主机名必须解析到公网 IP；反向解析、Unix 套接字、`sendmsg` 一律拒绝 | 原生扩展、ctypes、厂商 DLL / so 直接调用系统接口（如 xtquant 连接 MiniQMT）；插件启动的子进程（如调用 curl）不继承拦截（#7） |
 | 文件系统 | 不限制 | 插件可以读写当前用户能访问的任何文件 |
 | 凭据 | 子进程拿不到任何凭据。存储和注入见 [#6](https://github.com/xiaoapple0/duohelm/issues/6) | — |
 
@@ -189,6 +199,16 @@ with PluginSession(entry, deps=[...], limits=Limits.from_env(), cancel=event, lo
   - 清单字段（如插件的 `kind`）不在此列：清单受 `sdk` 版本范围约束，用了新取值的插件会被判为 SDK 不兼容，而不是被当作错误
 
 ### 变更记录
+
+**SDK 0.3.1（M1）**，`permissions.network` 收紧：
+
+- `network` 只允许公网地址：解析清单时拒绝本机、私有网段、链路本地、保留地址，以及 `localhost`、`*.local` 等明显指向本机或局域网的主机名，报错信息提示改用 `[[permissions.endpoints]]`
+- 运行时（平台 netguard），`network` 里的主机名解析到本机或私有网段时拦截；整个列表要用户确认后才放行（平台行为，不是 SDK 接口）
+
+迁移：
+
+- `network` 里写了本机或局域网地址的插件，改用 `[[permissions.endpoints]]`（例如 xtdata 的 `127.0.0.1:58610` 改为 `miniqmt` endpoint，scope 为 `lan`）。清单的 `sdk` 范围不用改：0.3.1 与 0.3.0 的接口相同，按旧写法声明了私有地址的清单在 0.3.1 上会被判为无效
+- 只写了公网地址的插件不需要改
 
 **SDK 0.3.0（M1）**，只有新增，但清单多了字段，旧版平台无法解析（清单不接受未知字段），所以升次版本号：
 

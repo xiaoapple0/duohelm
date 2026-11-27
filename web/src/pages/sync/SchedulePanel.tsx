@@ -22,12 +22,14 @@ const T = TEXT.schedule;
 interface LoadedProps {
   schedule: DataSyncSchedule;
   lastTask: Task | undefined;
+  /** 取最近任务失败的原因；有值时“上次定时任务”显示为未知 */
+  lastTaskError: string | undefined;
   plugins: Plugin[] | undefined;
   onSaved: (schedule: DataSyncSchedule) => void;
   onSelectTask: (id: number) => void;
 }
 
-function ScheduleForm({ schedule, lastTask, plugins, onSaved, onSelectTask }: LoadedProps) {
+function ScheduleForm({ schedule, lastTask, lastTaskError, plugins, onSaved, onSelectTask }: LoadedProps) {
   const { message } = App.useApp();
   const [enabled, setEnabled] = useState(schedule.enabled);
   const [pluginId, setPluginId] = useState(schedule.plugin_id ?? undefined);
@@ -89,7 +91,9 @@ function ScheduleForm({ schedule, lastTask, plugins, onSaved, onSelectTask }: Lo
           <span title={T.lastTriggerHint}>{schedule.last_trigger_date ?? T.lastTriggerNone}</span>
         </Descriptions.Item>
         <Descriptions.Item label={T.lastRun}>
-          {lastTask ? (
+          {lastTaskError ? (
+            <Typography.Text type="warning">{T.lastRunUnknown(lastTaskError)}</Typography.Text>
+          ) : lastTask ? (
             <Space direction="vertical" size={4}>
               <Space>
                 <StatusTag task={lastTask} />
@@ -165,44 +169,51 @@ async function loadLastScheduledTask(): Promise<Task | undefined> {
 }
 
 export default function SchedulePanel({ plugins, refreshKey, onSelectTask }: Props) {
-  const load = useCallback(
-    async () => ({
-      schedule: await api.dataSyncSchedule(),
-      lastTask: await loadLastScheduledTask(),
-      key: refreshKey,
-    }),
-    [refreshKey],
-  );
-  const { data, error, loading, reload } = useRequest(load);
+  // 规则和“上次定时任务”分开取：任务列表取失败不影响规则的查看和修改。
+  // 任务结束（refreshKey 变）只重取最近任务，不重取规则，避免覆盖表单里没保存的修改；
+  // 规则只在首次加载、保存成功、点“刷新”时以服务端为准。
+  const scheduleRequest = useRequest(api.dataSyncSchedule);
+  const loadLast = useCallback(() => {
+    void refreshKey;
+    return loadLastScheduledTask();
+  }, [refreshKey]);
+  const lastRequest = useRequest(loadLast);
   const [saved, setSaved] = useState<DataSyncSchedule>();
 
-  // 重新加载后以服务端为准
-  useEffect(() => {
-    setSaved(undefined);
-  }, [data]);
+  const schedule = saved ?? scheduleRequest.data;
+  const loading = scheduleRequest.loading || lastRequest.loading;
 
-  const schedule = saved ?? data?.schedule;
+  function refresh() {
+    setSaved(undefined);
+    scheduleRequest.reload();
+    lastRequest.reload();
+  }
 
   return (
     <Card
       title={T.title}
-      loading={loading && !data}
+      loading={scheduleRequest.loading && !scheduleRequest.data}
       extra={
-        <Button icon={<ReloadOutlined />} onClick={reload} loading={loading}>
+        <Button icon={<ReloadOutlined />} onClick={refresh} loading={loading}>
           {T.refresh}
         </Button>
       }
     >
-      {error && <Alert type="error" showIcon message={TEXT.loadFailed} description={error.message} />}
+      {scheduleRequest.error && (
+        <Alert
+          type="error"
+          showIcon
+          message={TEXT.loadFailed}
+          description={scheduleRequest.error.message}
+        />
+      )}
       {schedule && (
         <ScheduleForm
           schedule={schedule}
-          lastTask={data?.lastTask}
+          lastTask={lastRequest.error ? undefined : lastRequest.data}
+          lastTaskError={lastRequest.error?.message}
           plugins={plugins}
-          onSaved={(s) => {
-            setSaved(s);
-            reload();
-          }}
+          onSaved={setSaved}
           onSelectTask={onSelectTask}
         />
       )}

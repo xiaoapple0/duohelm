@@ -131,13 +131,6 @@ export interface DataSyncSchedulePatch {
   time?: string;
 }
 
-/** data.sync 的参数（SyncParams）。日期是 YYYY-MM-DD；end 省略表示最近一个已收盘的日子。 */
-export interface DataSyncParams {
-  plugin_id: string;
-  start: string;
-  end?: string;
-}
-
 /** data.sync 的结果（SyncResult）。字段以后端为准，页面对没有认识的字段原样显示。 */
 export interface DataSyncResult {
   plugin_id: string;

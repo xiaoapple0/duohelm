@@ -3,12 +3,12 @@ import { useEffect, useState } from "react";
 
 import { api, isUnfinished, type Task } from "../../api/client";
 import { useRequest } from "../../api/useRequest";
+import { useTaskFeed } from "../tasks/useTaskFeed";
 import ManualSync from "./ManualSync";
 import SchedulePanel from "./SchedulePanel";
 import { SYNC_TASK_TYPE } from "./keys";
 import TaskPanel from "./TaskPanel";
 import { TEXT } from "./text";
-import { useTaskFeed } from "./useTaskFeed";
 
 export default function DataSyncPage() {
   const plugins = useRequest(api.plugins);

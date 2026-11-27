@@ -3,13 +3,11 @@
 export const TEXT = {
   title: "数据同步",
   loadFailed: "加载失败",
-  none: "无",
 
   manual: {
     title: "手动同步",
     plugin: "行情源插件",
     pluginPlaceholder: "选择行情源插件",
-    pluginRequired: "请选择行情源插件",
     noPlugins: "没有行情源插件，请先在插件页检查",
     notReady: (status: string) => `（${status}，不可用）`,
     start: "开始日期",
@@ -51,10 +49,7 @@ export const TEXT = {
     error: "错误",
     result: "结果",
     logs: "日志",
-    noLogs: "暂无日志",
-    attempt: (n: number) => `第 ${n} 次执行`,
     loadFailed: "加载任务失败",
-    actionFailed: (reason: string) => `操作失败：${reason}`,
   },
 
   result: {
@@ -100,6 +95,7 @@ export const TEXT = {
     lastTriggerNone: "从未触发",
     lastTriggerHint: "触发、被去重跳过、判定为非交易日，都会记下当天",
     lastRun: "上次定时任务",
+    lastRunUnknown: (reason: string) => `未知（读取任务列表失败：${reason}）`,
     lastRunNone: "最近的任务里没有定时提交的同步任务",
     lastRunHint: "被去重跳过或当天不是交易日时不产生任务，只有上面的处理日期",
     needsFullSync:

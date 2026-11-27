@@ -11,6 +11,8 @@ dist/
 # Node
 node_modules/
 web/dist/
+web/test-results/
+web/playwright-report/
 
 # 编辑器与系统
 .DS_Store

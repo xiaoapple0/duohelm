@@ -316,6 +316,55 @@ class MarketReader:
             .sort("symbol")
         )
 
+    # ---- 每日快照：ST 名单和指数成分（#54）----
+
+    def st_on(self, day: date, *, snapshot: str | None = None) -> pl.DataFrame:
+        """day 这个交易日能用的 ST 名单（date、symbol、name、status、observed_at）。
+
+        只取 observed_at 之后的下一个交易日恰好是 day 的快照，不能用拍摄当天的；不向前顺延。
+        没有这样的快照抛 DataNotFoundError（“不知道”，不是“没有 ST”）。
+        """
+        return self._daily("st_daily", day, snapshot, None)
+
+    def index_members_on(
+        self, index: str, day: date, *, snapshot: str | None = None
+    ) -> pl.DataFrame:
+        """day 这个交易日能用的指数 index 成分（含 observed_at），规则同 st_on。"""
+        return self._daily("index_members_daily", day, snapshot, index)
+
+    def _daily(
+        self, dataset: str, day: date, snapshot: str | None, index: str | None
+    ) -> pl.DataFrame:
+        snap, _ = self._open(snapshot, "calendar", dataset)
+        calendar = (
+            self._store.read("calendar", snapshot=snap, columns=["market", "date"])
+            .filter(pl.col("market") == CALENDAR_MARKET)
+            .get_column("date")
+        )
+        prev = calendar.filter(calendar < day).max()
+        if day not in calendar.to_list() or not isinstance(prev, date):
+            raise DataNotFoundError(
+                f"{day} 不在快照 {snap} 的 {CALENDAR_MARKET} 日历里，或没有前一个交易日"
+            )
+        # 同步保证拍摄日期就是快照日期；多往前读几天，是给手工写入的、跨日的行留余地
+        rows = self._store.read(
+            dataset, snapshot=snap, start=prev - timedelta(days=7), end=day - timedelta(days=1)
+        )
+        if index is not None:
+            rows = rows.filter(pl.col("index") == index)
+        # 没有 observed_at 的旧行，拍摄日期按快照日期算（见 data.md）
+        taken = pl.coalesce(
+            pl.col("observed_at").dt.convert_time_zone("Asia/Shanghai").dt.date(), pl.col("date")
+        )
+        rows = rows.filter((taken >= prev) & (taken < day))
+        latest = rows.get_column("date").max()
+        if not isinstance(latest, date):
+            what = f"{dataset}{'' if index is None else f' 的 {index}'}"
+            raise DataNotFoundError(
+                f"快照 {snap} 里没有可用于 {day} 的 {what}：只能用 {prev} 及之后、{day} 之前拍的"
+            )
+        return rows.filter(pl.col("date") == latest)
+
     # ---- 内部 ----
 
     def _open(self, snapshot: str | None, *datasets: str) -> tuple[str, Manifest]:

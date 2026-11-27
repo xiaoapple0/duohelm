@@ -33,6 +33,7 @@ from duohelm.isolation.runner import Limits, PluginRunError, PluginSession, sess
 from duohelm.registry import PluginEntry, PluginRegistry, PluginStatus
 from duohelm.settings import Settings
 from duohelm.storage import DATASETS, DataStore, SnapshotConflictError
+from duohelm.storage.datasets import OBSERVED_AT
 from duohelm.storage.store import Transaction
 from duohelm.tasks.delisted import DEFAULT_RESCAN_DAYS, discover_securities
 from duohelm.tasks.quality import QualityCollector, report_frame, report_statuses
@@ -199,6 +200,7 @@ def data_sync(
                 addresses=addresses,
                 closed=closed,
                 today=today,
+                now=now,
                 indexes=DEFAULT_INDEXES if params.indexes is None else tuple(params.indexes),
                 rescan_days=params.rescan_days,
             )
@@ -240,6 +242,7 @@ def _run(
     addresses: Mapping[str, str],
     closed: date,
     today: date,
+    now: Callable[[], datetime],
     indexes: Sequence[str],
     rescan_days: float,
 ) -> SyncResult:
@@ -285,7 +288,14 @@ def _run(
         "quality_report": 0,
     }
     snap = _prepare_snapshots(
-        ctx, session, securities=securities, end=end, closed=closed, today=today, indexes=indexes
+        ctx,
+        session,
+        securities=securities,
+        end=end,
+        closed=closed,
+        today=today,
+        now=now,
+        indexes=indexes,
     )
     if not caps.exact_delist_date:
         ctx.log(f"插件 {plugin_id} 的退市日是近似值，记进 delist_date_quality")
@@ -363,6 +373,8 @@ class _Snapshots:
     st_failed: str | None = None
     members: dict[str, pl.DataFrame] = field(default_factory=lambda: {})
     index_failed: dict[str, str] = field(default_factory=lambda: {})
+    observed_at: datetime | None = None
+    """拍摄时间（北京时间，#54）：写入每一行的 observed_at。"""
 
 
 def _prepare_snapshots(
@@ -373,6 +385,7 @@ def _prepare_snapshots(
     end: date,
     closed: date,
     today: date,
+    now: Callable[[], datetime],
     indexes: Sequence[str],
 ) -> _Snapshots:
     """决定要不要写快照，并取好要写的内容（还没写）。
@@ -423,19 +436,31 @@ def _prepare_snapshots(
             ctx.log(f"不写 {day} 的 {index} 成分：{exc}", "warning")
         else:
             ctx.log(f"{day} 的 {index} 成分：{snap.members[index].height} 只")
+    # 拍摄时间取读完之后的时间：运行跨过午夜时，读到的可能已是下一天的状态，不能记成 day
+    observed = now().astimezone(SHANGHAI)
+    if observed.date() != day:
+        reason = (
+            f"读完数据时已是北京时间 {observed:%Y-%m-%d %H:%M}，不在快照日期 {day} 当天，不写快照"
+        )
+        ctx.log(f"不写 ST 名单和指数成分快照：{reason}")
+        return _Snapshots(skipped=reason)
+    snap.observed_at = observed
     return snap
 
 
 def _write_snapshots(tx: Transaction, data: DataStore, snap: _Snapshots) -> dict[str, int]:
     """写 ST 名单和指数成分快照（没有快照日期时什么都不写）。返回各数据集写入的行数。"""
     written = {"st_daily": 0, "index_members_daily": 0}
-    if snap.day is None:
+    if snap.day is None or snap.observed_at is None:
         return written
+    stamp = pl.lit(snap.observed_at).cast(OBSERVED_AT).alias("observed_at")
     if snap.st is not None:
-        written["st_daily"] = _write_day(tx, data, "st_daily", snap.day, snap.st)
+        written["st_daily"] = _write_day(
+            tx, data, "st_daily", snap.day, snap.st.with_columns(stamp)
+        )
     for index, members in snap.members.items():
         written["index_members_daily"] += _write_day(
-            tx, data, "index_members_daily", snap.day, members, index=index
+            tx, data, "index_members_daily", snap.day, members.with_columns(stamp), index=index
         )
     return written
 
@@ -459,7 +484,24 @@ def _write_day(
         stale = stale_keys(existing, rows, list(DATASETS[dataset].keys))
     if stale.height:
         tx.delete(dataset, stale)
-    return tx.write(dataset, rows)
+    return tx.write(dataset, _keep_first_observed(existing, rows))
+
+
+def _keep_first_observed(existing: pl.DataFrame, rows: pl.DataFrame) -> pl.DataFrame:
+    """内容和已有行相同的行，保留已有的 observed_at（最早看到这个状态的时间，#54）。
+
+    已有行没有 observed_at（旧数据）时用这次的时间：这次是真实的观察。
+    """
+    content = [c for c in rows.columns if c != "observed_at"]
+    first = (
+        existing.filter(pl.col("observed_at").is_not_null())
+        .select(*content, pl.col("observed_at").alias("_first"))
+        .unique(subset=content)
+    )
+    joined = rows.join(first, on=content, how="left", nulls_equal=True)
+    return joined.with_columns(pl.coalesce("_first", "observed_at").alias("observed_at")).select(
+        rows.columns
+    )
 
 
 # ---------------------------------------------------------------- 各步骤

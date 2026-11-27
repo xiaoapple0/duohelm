@@ -50,11 +50,16 @@ DELIST_DATE_QUALITY_SCHEMA: dict[str, pl.DataType] = {"symbol": pl.String(), "ex
 快照里没有这个数据集的行时，是“不知道”，不是“精确”。
 """
 
+OBSERVED_AT = pl.Datetime("us", "Asia/Shanghai")
+"""快照的拍摄时间（#54）：按 Asia/Shanghai 记录的带时区时间戳，可为空，不是主键。快照只能
+用于拍摄时间之后的下一个交易日；没有这一列的旧文件，读出来为 null。"""
+
 ST_DAILY_SCHEMA: dict[str, pl.DataType] = {
     "date": pl.Date(),
     "symbol": pl.String(),
     "name": pl.String(),
     "status": pl.String(),
+    "observed_at": OBSERVED_AT,
 }
 """每日 ST 名单快照（平台的数据集）：date 那天的 ST 证券和 ST 状态未知的证券。
 
@@ -66,6 +71,7 @@ INDEX_MEMBERS_DAILY_SCHEMA: dict[str, pl.DataType] = {
     "date": pl.Date(),
     "index": pl.String(),
     "symbol": pl.String(),
+    "observed_at": OBSERVED_AT,
 }
 """每日指数成分快照（平台的数据集）。某个日期某个指数有行才表示这一天有这个指数的快照。"""
 

@@ -35,6 +35,7 @@ from duohelm.settings import Settings
 from duohelm.storage import DATASETS, DataStore, SnapshotConflictError
 from duohelm.storage.store import Transaction
 from duohelm.tasks.delisted import DEFAULT_RESCAN_DAYS, discover_securities
+from duohelm.tasks.quality import QualityCollector, report_frame, report_statuses
 from duohelm.tasks.snapshots import (
     DEFAULT_INDEXES,
     SnapshotUnavailableError,
@@ -135,6 +136,9 @@ class SyncResult(BaseModel):
     """名称为空、ST 状态未知（写成 status = unknown）的在市股票数。"""
     index_snapshot_failed: dict[str, str] = Field(default_factory=dict)
     """没有写成分快照的指数及原因（插件没实现、报错、格式不对、成分为空）。"""
+    quality: dict[str, str] = Field(default_factory=dict)
+    """质量报告各项检查的状态：ok、issues（有问题）、unavailable（无法检查）。
+    完整报告随快照保存，见 docs/subsystems/data.md 的“入库质量报告”。只报告，不阻止提交。"""
 
 
 def _beijing_now() -> datetime:
@@ -278,6 +282,7 @@ def _run(
         "adj_factors": 0,
         "st_daily": 0,
         "index_members_daily": 0,
+        "quality_report": 0,
     }
     snap = _prepare_snapshots(
         ctx, session, securities=securities, end=end, closed=closed, today=today, indexes=indexes
@@ -285,6 +290,13 @@ def _run(
     if not caps.exact_delist_date:
         ctx.log(f"插件 {plugin_id} 的退市日是近似值，记进 delist_date_quality")
     dropped = 0
+    collector = QualityCollector(
+        calendar,
+        securities,
+        start,
+        end,
+        delist_quality=delist_date_quality(securities, caps),
+    )
     batches = [symbols[i : i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
     try:
         with data.transaction(
@@ -295,29 +307,26 @@ def _run(
                 "delist_date_quality", delist_date_quality(securities, caps)
             )
             written["calendar"] = tx.write("calendar", calendar)
-            if snap.day is not None:
-                if snap.st is not None:
-                    written["st_daily"] = _write_day(tx, data, "st_daily", snap.day, snap.st)
-                for index, members in snap.members.items():
-                    written["index_members_daily"] += _write_day(
-                        tx, data, "index_members_daily", snap.day, members, index=index
-                    )
+            written |= _write_snapshots(tx, data, snap)
             for i, batch in enumerate(batches):
                 ctx.progress(
                     base + 0.01 + (0.98 - base) * i / len(batches),
                     f"日线和复权因子：{i * BATCH_SIZE}/{len(symbols)}",
                 )
-                bars, zero = fetch_bars(session, batch, start, end)
-                dropped += zero
+                bars, placeholders = fetch_bars(session, batch, start, end)
+                dropped += placeholders.height
                 written["bars_1d"] += tx.write("bars_1d", bars)
-                written["adj_factors"] += tx.write(
-                    "adj_factors", fetch_adj_factors(session, batch, end)
-                )
+                factors = fetch_adj_factors(session, batch, end)
+                written["adj_factors"] += tx.write("adj_factors", factors)
+                collector.add_batch(batch, bars, placeholders, factors)
+            report = collector.finish(plugin_id)
+            written["quality_report"] = tx.write("quality_report", report_frame(report))
             ctx.check_cancelled()  # 提交前最后一次检查：取消的任务不留下快照
     except SnapshotConflictError as exc:
         raise RetryableError(f"提交时当前快照已被别的写入改变：{exc}") from exc
     if dropped:
         ctx.log(f"丢弃成交量为 0 的行 {dropped} 行（停牌占位）")
+    ctx.log(f"质量报告（只报告，不阻止提交）：{report_statuses(report)}")
     ctx.log(f"写入：{written}；快照 {tx.snapshot_id or '没有变化，未产生新快照'}")
     ctx.progress(1.0, "完成")
     return SyncResult(
@@ -338,6 +347,7 @@ def _run(
         st_snapshot_failed=snap.st_failed,
         st_unknown_names=snap.st_unknown,
         index_snapshot_failed=snap.index_failed,
+        quality=report_statuses(report),
     )
 
 
@@ -414,6 +424,20 @@ def _prepare_snapshots(
         else:
             ctx.log(f"{day} 的 {index} 成分：{snap.members[index].height} 只")
     return snap
+
+
+def _write_snapshots(tx: Transaction, data: DataStore, snap: _Snapshots) -> dict[str, int]:
+    """写 ST 名单和指数成分快照（没有快照日期时什么都不写）。返回各数据集写入的行数。"""
+    written = {"st_daily": 0, "index_members_daily": 0}
+    if snap.day is None:
+        return written
+    if snap.st is not None:
+        written["st_daily"] = _write_day(tx, data, "st_daily", snap.day, snap.st)
+    for index, members in snap.members.items():
+        written["index_members_daily"] += _write_day(
+            tx, data, "index_members_daily", snap.day, members, index=index
+        )
+    return written
 
 
 def _write_day(
@@ -516,8 +540,8 @@ def symbols_in_range(securities: pl.DataFrame, start: date, end: date) -> list[s
 
 def fetch_bars(
     session: PluginSession, symbols: Sequence[str], start: date, end: date
-) -> tuple[pl.DataFrame, int]:
-    """未复权日线。返回 (成交量不为 0 的行, 丢弃的行数)。"""
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """未复权日线。返回 (成交量不为 0 的行, 丢弃的成交量为 0 的占位行)。"""
     df = _frame(session.call("bars", list(symbols), Freq.DAY, start, end), "bars")
     problems = schema_problems(df, BARS_SCHEMA)
     if problems:
@@ -529,7 +553,7 @@ def fetch_bars(
         # 成交量不知道不等于 0：当成停牌丢掉会把数据源的缺陷藏起来
         raise SyncError(f"日线有 {unknown} 行成交量为空")
     kept = df.filter(pl.col("volume") != 0.0)
-    return kept, df.height - kept.height
+    return kept, df.filter(pl.col("volume") == 0.0)
 
 
 def fetch_adj_factors(session: PluginSession, symbols: Sequence[str], end: date) -> pl.DataFrame:

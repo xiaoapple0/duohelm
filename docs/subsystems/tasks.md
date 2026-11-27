@@ -25,6 +25,7 @@
 | `packages/duohelm/src/duohelm/api/tasks.py` | HTTP 接口 |
 | `packages/duohelm/src/duohelm/api/schedules.py` | 定时规则的 HTTP 接口 |
 | `web/src/pages/tasks/` | Web 任务中心页面；界面文字在 `text.ts` |
+| `web/src/pages/sync/` | Web 数据同步页面（手动同步和定时规则） |
 
 ## 数据表
 
@@ -123,7 +124,7 @@
 | GET | `/api/schedules/data-sync` | `{enabled, plugin_id, time, timezone, last_trigger_date, plugin_warning, needs_full_sync, state_error, next_run_at}` |
 | PATCH | `/api/schedules/data-sync` | `{enabled?, plugin_id?, time?}`，只改传入的字段，返回同上。启用时校验插件存在且 kind 为 `datasource`，否则 422；插件状态不是 `ready` 时允许保存，响应的 `plugin_warning` 给出说明；已启用但插件已被删除（找不到）时，GET 的 `plugin_warning` 也给出说明。`time` 格式 `HH:MM` 且晚于 15:30，否则 422；`enabled=true` 但没有 `plugin_id` 返回 422 |
 
-页面（查看和修改规则、显示下次触发时间）不在这里做，归 [#33](https://github.com/xiaoapple0/duohelm/issues/33)（同步任务页面）。
+页面见 [data.md](data.md) 的“同步页面”（`web/src/pages/sync/`，#33）。
 
 ## 正确性要求
 
@@ -135,6 +136,5 @@
 
 - 历史任务和日志永久保留，没有清理：[#3](https://github.com/xiaoapple0/duohelm/issues/3)
 - handler 在线程里运行，取消是协作式的。handler 不经过检查点时，无法中途停止
-- 定时规则的页面还没有，只有 API，归 #33
 - 定时触发时不再检查插件：启用时校验过存在且是行情源，但之后插件被删除或变得不可用，每个交易日会提交一个失败的 `data.sync`（`plugin_warning` 会提示），失败在任务中心可见，跟踪见 [#57](https://github.com/xiaoapple0/duohelm/issues/57)
 - 任务中心页面只显示最近 100 个任务，还没有翻页（接口已支持 `before_id` 游标）

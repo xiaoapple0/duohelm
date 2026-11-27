@@ -69,6 +69,11 @@ INDEX_MEMBERS_DAILY_SCHEMA: dict[str, pl.DataType] = {
 }
 """每日指数成分快照（平台的数据集）。某个日期某个指数有行才表示这一天有这个指数的快照。"""
 
+QUALITY_REPORT_SCHEMA: dict[str, pl.DataType] = {"key": pl.String(), "report": pl.String()}
+"""入库质量报告（平台的数据集，#31）：只有一行，``key`` 为 ``sync``，``report`` 是报告的 JSON。
+和数据在同一个事务里写入，随快照保存；每次同步覆盖上一次的报告。快照里没有这一行时，表示
+这个快照没有质量报告（早于 #31 的快照），不是“没有问题”。"""
+
 DATASETS: dict[str, Dataset] = {
     d.name: d
     for d in (
@@ -77,6 +82,7 @@ DATASETS: dict[str, Dataset] = {
         Dataset("securities", SECURITIES_SCHEMA, ("symbol",)),
         Dataset("calendar", CALENDAR_SCHEMA, ("market", "date")),
         Dataset("delist_date_quality", DELIST_DATE_QUALITY_SCHEMA, ("symbol",)),
+        Dataset("quality_report", QUALITY_REPORT_SCHEMA, ("key",)),
         Dataset("st_daily", ST_DAILY_SCHEMA, ("date", "symbol"), partition_by_year="date"),
         Dataset(
             "index_members_daily",

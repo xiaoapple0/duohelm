@@ -115,8 +115,10 @@ class Plain:
 
     def trading_calendar(self, market, start, end):
         record(f"trading_calendar {market}")
+        skip = {date.fromisoformat(d) for d in B.get("calendar_skip", [])}
         return pl.DataFrame(
-            {"date": [d for d in CALENDAR if start <= d <= end]}, schema={"date": pl.Date}
+            {"date": [d for d in CALENDAR if start <= d <= end and d not in skip]},
+            schema={"date": pl.Date},
         )
 
     def bars(self, symbols, freq, start, end):
@@ -127,12 +129,19 @@ class Plain:
         for s in symbols:
             last = date(2024, 1, 3) if s == "600005.SH" else end
             for d in CALENDAR:
+                if (s, d.isoformat()) in {tuple(x) for x in B.get("drop_bar", [])}:
+                    continue
                 if start <= d <= last:
                     volume = 0.0 if (s, d) == ("000001.SZ", date(2024, 1, 3)) else 1000.0
                     if B.get("null_volume") and s == "600000.SH" and d == start:
                         volume = None
                     amount = None if volume is None else volume * 10.5
-                    rows.append((d, s, 10.0, 11.0, 9.0, 10.5, volume, amount))
+                    o, h, lo, c = 10.0, 11.0, 9.0, 10.5
+                    if B.get("bad_ohlc") and (s, d.isoformat()) == ("600000.SH", "2024-01-04"):
+                        h = 10.2  # 最高价低于收盘价
+                    if B.get("bad_ohlc") and (s, d.isoformat()) == ("000001.SZ", "2024-01-05"):
+                        lo = -1.0  # 价格非正
+                    rows.append((d, s, o, h, lo, c, volume, amount))
         if B.get("bad_bars"):
             rows.append((start, "999999.SH", 1.0, 1.0, 1.0, 1.0, 1.0, 1.0))
         if B.get("late_bars"):
@@ -300,6 +309,7 @@ def test_sync_uses_confirmed_address_and_writes_snapshot(settings: Settings) -> 
         "adj_factors": 2,
         "st_daily": 0,  # end 早于最近一个已收盘的日子，不写快照
         "index_members_daily": 0,
+        "quality_report": 1,
     }
     assert result.snapshot_date is None and result.snapshot_skipped is not None
     assert data.read("st_daily").height == 0
@@ -1164,3 +1174,82 @@ def test_index_not_in_this_run_is_left_alone(settings: Settings) -> None:
     rows = snapshot_rows(settings, "index_members_daily")
     assert [r for r in rows if r[1] == "000905.SH"] == others
     assert [r[2] for r in rows if r[1] == "000300.SH"] == ["600000.SH"]
+
+
+# ---- 质量报告（#31）----
+
+
+def quality_report(settings: Settings, snapshot_id: str | None) -> dict[str, Any]:
+    data = DataStore(settings.data_dir)
+    rows = data.read("quality_report", snapshot=snapshot_id)
+    assert rows.height == 1
+    return json.loads(rows.item(0, "report"))
+
+
+def test_clean_data_report_is_saved_with_snapshot(settings: Settings) -> None:
+    """正常数据：OHLC 和日历没有问题；没有除权除息记录，复权跳变是“无法检查”，不是 ok；
+    停牌占位行（成交量为 0）已扣除并单独计数，停牌信息整体仍标为未知。"""
+    install(settings)
+    confirm(settings)
+    store, task_id = run(settings)
+    result = result_of(store, task_id)
+    assert result.quality == {
+        "ohlc": "ok",
+        "calendar_dates": "ok",
+        "adj_factor_jumps": "unavailable",
+        "missing_days": "ok",
+    }
+    report = quality_report(settings, result.snapshot_id)
+    checks = report["checks"]
+    assert checks["ohlc"]["rows_checked"] == 13
+    assert checks["adj_factor_jumps"]["status"] == "unavailable"
+    assert "除权除息" in checks["adj_factor_jumps"]["reason"]
+    missing = checks["missing_days"]
+    assert missing["suspension"] == "unknown"
+    assert missing["missing_total"] == 0
+    assert missing["placeholder_total"] == 1
+    assert missing["per_symbol"] == [{"symbol": "000001.SZ", "missing": 0, "placeholder": 1}]
+    assert report["trading_days"] == 4 and report["symbols"] == 4
+
+
+def test_bad_data_is_reported_but_not_blocked(settings: Settings) -> None:
+    """OHLC 不一致、日期不在日历里、缺交易日：全部进报告，同步照常提交快照。"""
+    install(
+        settings,
+        bad_ohlc=True,
+        calendar_skip=["2024-01-04"],
+        drop_bar=[["600000.SH", "2024-01-03"]],
+    )
+    confirm(settings)
+    store, task_id = run(settings)
+    result = result_of(store, task_id)
+    assert result.snapshot_id is not None  # 只报告，不阻止提交
+    assert result.quality["ohlc"] == "issues"
+    assert result.quality["calendar_dates"] == "issues"
+    assert result.quality["missing_days"] == "issues"
+    checks = quality_report(settings, result.snapshot_id)["checks"]
+    assert checks["ohlc"]["issues"]["high_below_open_close"] == 1
+    assert checks["ohlc"]["issues"]["non_positive_price"] == 1
+    assert {(e["symbol"], e["date"]) for e in checks["ohlc"]["examples"]} == {
+        ("600000.SH", "2024-01-04"),
+        ("000001.SZ", "2024-01-05"),
+    }
+    # 日历缺 2024-01-04，但 3 只证券在这天有 K 线（600005.SH 已于 01-03 退市）
+    assert checks["calendar_dates"]["rows_not_in_calendar"] == 3
+    # 600000.SH 缺 01-03；日历里没有 01-04，所以那天不算应有的交易日
+    assert checks["missing_days"]["per_symbol"] == [
+        {"symbol": "000001.SZ", "missing": 0, "placeholder": 1},
+        {"symbol": "600000.SH", "missing": 1, "placeholder": 0},
+    ]
+
+
+def test_rerun_with_same_report_writes_no_snapshot(settings: Settings) -> None:
+    """报告不含时间戳：同样的数据，同样的报告，不会因为报告产生新快照。"""
+    install(settings, bad_ohlc=True)
+    confirm(settings)
+    store, first = run(settings)
+    result_of(store, first)
+    store, second = run(settings)
+    result = result_of(store, second)
+    assert result.snapshot_id is None
+    assert result.written["quality_report"] == 0

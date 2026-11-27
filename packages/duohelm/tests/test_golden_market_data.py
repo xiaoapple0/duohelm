@@ -340,6 +340,7 @@ def test_sync_counts(golden: tuple[DataStore, SyncResult]) -> None:
         # 按 data.md“ST 名单和指数成分快照”的规则不写快照（#43）
         "st_daily": 0,
         "index_members_daily": 0,
+        "quality_report": 1,
     }
 
 

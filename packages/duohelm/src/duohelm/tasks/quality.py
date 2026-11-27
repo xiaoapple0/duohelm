@@ -225,9 +225,13 @@ class QualityCollector:
     # ---- 报告 ----
 
     def _conflict_check(self) -> dict[str, Any]:
-        """退市日冲突：精确数据源说在市，另一个数据源（或来源未知）说已退市，以精确数据源为准、
-        按在市处理（不论谁后同步）。如果精确数据源漏报了退市，会有幸存者偏差：逐只列出
-        两边的数据源和日期，方便核对。"""
+        """退市日冲突：两个数据源对同一只证券一个说在市、一个说已退市，逐只列出两边的数据源和日期。
+
+        exact_confirmed 为 True：exact_source 是精确数据源，它说在市，入库按在市处理（不论谁后
+        同步）；other_source 给的退市日没有入库。如果精确数据源漏报了退市，会有幸存者偏差。
+        exact_confirmed 为 False（过渡期）：exact_source 写的在市行 exact 为 null，不知道它是不是
+        精确数据源，入库的是 other_source（近似数据源）给的退市日，即按已退市处理；如果
+        exact_source 其实是精确数据源，那是它的在市被覆盖了。"""
         rows = self._conflicts.to_dicts() if self._conflicts is not None else []
         return {
             "status": "issues" if rows else "ok",

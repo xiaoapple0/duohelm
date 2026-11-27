@@ -1,6 +1,7 @@
 import {
   ApiOutlined,
   AppstoreOutlined,
+  BarChartOutlined,
   DashboardOutlined,
   ExperimentOutlined,
   FunctionOutlined,
@@ -13,6 +14,7 @@ import { Layout, Menu, Typography } from "antd";
 import type { ReactNode } from "react";
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
+import KlinePage from "./pages/kline/KlinePage";
 import OverviewPage from "./pages/OverviewPage";
 import PlaceholderPage from "./pages/PlaceholderPage";
 import PluginsPage from "./pages/PluginsPage";
@@ -99,6 +101,7 @@ const NAV: NavItem[] = [
       />
     ),
   },
+  { path: "/kline", label: "K 线查看", icon: <BarChartOutlined />, element: <KlinePage /> },
   { path: "/plugins", label: "插件", icon: <ApiOutlined />, element: <PluginsPage /> },
   {
     path: "/tasks",

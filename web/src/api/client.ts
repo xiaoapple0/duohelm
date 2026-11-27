@@ -152,7 +152,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-function getJson<T>(path: string): Promise<T> {
+export function getJson<T>(path: string): Promise<T> {
   return request<T>(path);
 }
 
@@ -176,7 +176,7 @@ function deleteJson<T>(path: string): Promise<T> {
   return request<T>(path, { method: "DELETE" });
 }
 
-function query(params: Record<string, string | number | undefined>): string {
+export function query(params: Record<string, string | number | undefined>): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) {

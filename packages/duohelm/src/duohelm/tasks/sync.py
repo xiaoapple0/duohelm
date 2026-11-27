@@ -563,11 +563,11 @@ def _merge_delist_dates(
             f"{len(merged.kept_exact)} 只证券已有别的数据源给的精确退市日，保留它而不用"
             f"这次的值，例如 {examples(merged.kept_exact)}"
         )
-    overridden = merged.in_market_over_delisted
+    overridden = merged.reports
     if overridden.height:
         ctx.log(
-            f"{overridden.height} 只证券这次的数据源（精确）说在市，已有别的数据源（或来源未知）"
-            "给的退市日：以这次为准，按在市处理。如果这次的数据源漏报了退市，会有幸存者偏差，"
+            f"{overridden.height} 只证券的精确数据源说在市、另一个数据源（或来源未知）说已退市："
+            "以精确数据源为准，按在市处理。如果精确数据源漏报了退市，会有幸存者偏差，"
             "两边的数据源和日期见质量报告的 delist_date_conflicts，请核对，例如 "
             f"{examples(overridden.get_column('symbol').to_list())}",
             "warning",

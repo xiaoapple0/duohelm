@@ -398,10 +398,10 @@ def test_securities_and_delist_dates(golden: tuple[DataStore, SyncResult]) -> No
     assert last_bar == D3
     assert got["600800.SH"][1] == D8
     assert got["600800.SH"][1] != last_bar
-    # 退市日精确（插件声明 exact_delist_date=True）；在市的是 null
+    # 退市日精确（插件声明 exact_delist_date=True）；精确数据源写的在市行也是 True（确认在市）
     quality = dict(data.read("delist_date_quality").select("symbol", "exact").rows())
     assert quality["600800.SH"] is True and quality["600900.SH"] is True
-    assert quality["600100.SH"] is None
+    assert quality["600100.SH"] is True
 
 
 def test_adj_factors(golden: tuple[DataStore, SyncResult]) -> None:

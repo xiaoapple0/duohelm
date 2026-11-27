@@ -52,7 +52,8 @@ DELIST_DATE_QUALITY_SCHEMA: dict[str, pl.DataType] = {
 
 ``exact`` 为 True：精确（数据源没有声明是近似值）；为 False：数据源拿不到摘牌日，
 ``delist_date`` 是近似值（``Capabilities.exact_delist_date`` 为 False）；为 null：
-仍在市，没有退市日。和 securities 在同一个事务里整行写入，两者一一对应。
+仍在市，没有退市日，且不是精确数据源写的。精确数据源写的在市行（没有退市日）也是 True：
+精确数据源确认在市，和精确的退市日一样受保护。和 securities 在同一个事务里整行写入，两者一一对应。
 快照里没有这个数据集的行时，是“不知道”，不是“精确”。``source`` 是这一行来自哪个数据源
 插件（可为空，旧文件没有这一列，读出来为 null）：多个数据源写同一个快照时，靠它区分
 “自己的行”和“别人的行”（tasks/delist_merge.py）。

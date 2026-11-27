@@ -64,7 +64,7 @@ class QualityCollector:
             .filter(pl.col("delist_date").is_not_null() & pl.col("exact").ne_missing(True))
             .select("symbol", pl.col("exact").alias("delist_date_exact"))
         )
-        # 精确源说在市、覆盖了别人的退市日：symbol、other_source、other_delist_date
+        # 退市日冲突：symbol、exact_source、exact_delist_date、other_source、other_delist_date
         self._conflicts = delist_conflicts.sort("symbol") if delist_conflicts is not None else None
         self._start = start
         self._end = end
@@ -224,9 +224,9 @@ class QualityCollector:
 
     # ---- 报告 ----
 
-    def _conflict_check(self, plugin_id: str) -> dict[str, Any]:
-        """退市日冲突：这次的数据源（精确）说在市，别的数据源（或来源未知）给过退市日，
-        以这次为准、按在市处理。如果这次的数据源漏报了退市，会有幸存者偏差：逐只列出
+    def _conflict_check(self) -> dict[str, Any]:
+        """退市日冲突：精确数据源说在市，另一个数据源（或来源未知）说已退市，以精确数据源为准、
+        按在市处理（不论谁后同步）。如果精确数据源漏报了退市，会有幸存者偏差：逐只列出
         两边的数据源和日期，方便核对。"""
         rows = self._conflicts.to_dicts() if self._conflicts is not None else []
         return {
@@ -235,8 +235,8 @@ class QualityCollector:
             "examples": [
                 {
                     "symbol": r["symbol"],
-                    "exact_source": plugin_id,
-                    "exact_delist_date": None,  # 在市
+                    "exact_source": r["exact_source"],
+                    "exact_delist_date": _iso(r["exact_delist_date"]),  # 在市为 None
                     "other_source": r["other_source"],
                     "other_delist_date": _iso(r["other_delist_date"]),
                 }
@@ -290,7 +290,7 @@ class QualityCollector:
                     "examples": self._cal_examples,
                 },
                 "adj_factor_jumps": adj,
-                "delist_date_conflicts": self._conflict_check(plugin_id),
+                "delist_date_conflicts": self._conflict_check(),
                 "missing_days": {
                     "status": "issues" if missing_total else "ok",
                     # 数据源没有提供停牌日列表：没有 K 线又没有占位行的日子，可能是停牌，

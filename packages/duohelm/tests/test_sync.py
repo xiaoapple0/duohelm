@@ -72,16 +72,10 @@ def all_securities():
     changed = B.get("delist_now", {})
     names = B.get("names", {})
     absent = B.get("absent", [])  # 这次运行里数据源还不认识的证券（比如还没上市）
-    # bse_legacy：北交所旧代码上已退市的证券（只能靠扫描发现），另有两只 B 股
-    extra = [
-        ("830799.BJ", "旧代码退市股", "BJ", "stock", date(2014, 5, 20), date(2024, 1, 3)),
-        ("900901.SH", "某B股", "SH", "stock", date(1992, 2, 21), date(2024, 1, 3)),
-        ("200002.SZ", "某B股", "SZ", "stock", date(1992, 2, 28), date(2024, 1, 3)),
-    ] if B.get("bse_legacy") else []
     return [
         (row[0], names.get(row[0], row[1]), *row[2:5],
          date.fromisoformat(changed[row[0]]) if row[0] in changed else row[5])
-        for row in [*SECURITIES, *extra]
+        for row in SECURITIES
         if row[0] not in absent
     ]
 
@@ -131,7 +125,7 @@ class Plain:
             time.sleep(30)
         rows = []
         for s in symbols:
-            last = date(2024, 1, 3) if s in ("600005.SH", "830799.BJ") else end
+            last = date(2024, 1, 3) if s == "600005.SH" else end
             for d in CALENDAR:
                 if start <= d <= last:
                     volume = 0.0 if (s, d) == ("000001.SZ", date(2024, 1, 3)) else 1000.0
@@ -703,36 +697,9 @@ def test_scanned_delist_dates_marked_approximate(settings: Settings, small_scan:
     }
 
 
-def test_scan_finds_delisted_bse_legacy_codes_but_not_b_shares(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """北交所旧代码（43/83/87）上已退市、代码表里没有的股票能被发现并取到日线；B 股不扫（#35）。"""
-    legacy = tuple(r for r in delisted.SCAN_RANGES if r[0] == "BJ" and r[1] < 920000)
-    monkeypatch.setattr(delisted, "SCAN_RANGES", SMALL_RANGES + legacy)
-    monkeypatch.setattr(delisted, "SCAN_BATCH", 1000)
-    plugin = install(settings, lists_delisted=False, bse_legacy=True)
-    confirm(settings)
-    store, task_id = run(settings)
-    result_of(store, task_id)
-
-    scanned = {s for batch in lookups(plugin) for s in batch.split(",")}
-    assert "830799.BJ" in scanned
-    # B 股在数据源里有记录，但不在扫描区间内，所以不被查询，也不进证券列表
-    assert not {"900901.SH", "200002.SZ"} & scanned
-
-    data = DataStore(settings.data_dir)
-    securities = {r["symbol"]: r for r in data.read("securities").iter_rows(named=True)}
-    assert securities["830799.BJ"]["delist_date"] == date(2024, 1, 3)
-    assert "900901.SH" not in securities and "200002.SZ" not in securities
-    bars = data.read("bars_1d").filter(pl.col("symbol") == "830799.BJ")
-    assert bars.height == 2
-    assert "830799.BJ" in data.catalog.found_symbols("fake-src")
-
-
 def test_scan_ranges_cover_a_shares_and_bj() -> None:
     symbols = delisted.scan_symbols()
-    # 沪深和 920 段 16999 个，北交所旧代码 2000 + 10000 + 4000 个
-    assert len(symbols) == len(set(symbols)) == 16999 + 16000 == 32999
+    assert len(symbols) == len(set(symbols)) == 6000 + 2000 + 4999 + 3000 + 1000
     for symbol in [
         "600000.SH",
         "605999.SH",
@@ -745,17 +712,17 @@ def test_scan_ranges_cover_a_shares_and_bj() -> None:
         "302132.SZ",
         "302999.SZ",
         "920000.BJ",
-        "430000.BJ",
-        "431999.BJ",
-        "830000.BJ",
-        "839999.BJ",
-        "870000.BJ",
-        "873999.BJ",
     ]:
         assert symbol in symbols
     assert "000000.SZ" not in symbols
-    assert "432000.BJ" not in symbols and "874000.BJ" not in symbols  # 未核对，没扫
-    assert "900901.SH" not in symbols and "200002.SZ" not in symbols  # 不含 B 股
+    # 不含 B 股（#69）
+    assert "900901.SH" not in symbols and "200002.SZ" not in symbols
+    # 不含北交所旧代码 43/83/87 号段（#70）：整段断言，不只是端点
+    legacy = [s for s in symbols if s.endswith(".BJ") and s[:2] in ("43", "83", "87")]
+    assert legacy == []
+    assert {s for s in symbols if s.endswith(".BJ")} == {
+        f"{c:06d}.BJ" for c in range(920000, 921000)
+    }
 
 
 def test_unknown_plugin_fails(settings: Settings) -> None:

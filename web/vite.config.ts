@@ -1,9 +1,11 @@
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 
 // 开发时把 /api 代理到本机后端（duohelm serve 默认端口 8765）。
 export default defineConfig({
   plugins: [react()],
+  // 单元测试只跑 src 下的 *.test.ts；e2e/ 下是 Playwright 的测试，由 npm run test:e2e 运行
+  test: { include: ["src/**/*.test.ts"] },
   server: {
     host: "127.0.0.1",
     // 端口固定：后端只接受本机这个端口（DUOHELM_WEB_PORT，默认 5173）的 Host 和 Origin，

@@ -49,6 +49,7 @@ class QualityCollector:
         ex_events: pl.DataFrame | None = None,
         ex_events_missing_reason: str = "数据源没有提供除权除息记录",
         delist_quality: pl.DataFrame | None = None,
+        delist_conflicts: pl.DataFrame | None = None,
     ) -> None:
         self._calendar = calendar.select("date").unique()
         self._securities = securities.select("symbol", "list_date", "delist_date")
@@ -63,6 +64,8 @@ class QualityCollector:
             .filter(pl.col("delist_date").is_not_null() & pl.col("exact").ne_missing(True))
             .select("symbol", pl.col("exact").alias("delist_date_exact"))
         )
+        # 退市日冲突：symbol、exact_source、exact_delist_date、other_source、other_delist_date
+        self._conflicts = delist_conflicts.sort("symbol") if delist_conflicts is not None else None
         self._start = start
         self._end = end
         self._events = ex_events
@@ -221,6 +224,31 @@ class QualityCollector:
 
     # ---- 报告 ----
 
+    def _conflict_check(self) -> dict[str, Any]:
+        """退市日冲突：两个数据源对同一只证券一个说在市、一个说已退市，逐只列出两边的数据源和日期。
+
+        exact_confirmed 为 True：exact_source 是精确数据源，它说在市，入库按在市处理（不论谁后
+        同步）；other_source 给的退市日没有入库。如果精确数据源漏报了退市，会有幸存者偏差。
+        exact_confirmed 为 False（过渡期）：exact_source 写的在市行 exact 为 null，不知道它是不是
+        精确数据源，入库的是 other_source（近似数据源）给的退市日，即按已退市处理；如果
+        exact_source 其实是精确数据源，那是它的在市被覆盖了。"""
+        rows = self._conflicts.to_dicts() if self._conflicts is not None else []
+        return {
+            "status": "issues" if rows else "ok",
+            "count": len(rows),
+            "examples": [
+                {
+                    "symbol": r["symbol"],
+                    "exact_source": r["exact_source"],
+                    "exact_confirmed": r["exact_confirmed"],
+                    "exact_delist_date": _iso(r["exact_delist_date"]),  # 在市为 None
+                    "other_source": r["other_source"],
+                    "other_delist_date": _iso(r["other_delist_date"]),
+                }
+                for r in rows[:MAX_EXAMPLES]
+            ],
+        }
+
     def finish(self, plugin_id: str) -> dict[str, Any]:
         """生成报告（可以直接 json 序列化，不含时间戳）。"""
         ohlc_status: Status = "issues" if self._ohlc_rows else "ok"
@@ -267,6 +295,7 @@ class QualityCollector:
                     "examples": self._cal_examples,
                 },
                 "adj_factor_jumps": adj,
+                "delist_date_conflicts": self._conflict_check(),
                 "missing_days": {
                     "status": "issues" if missing_total else "ok",
                     # 数据源没有提供停牌日列表：没有 K 线又没有占位行的日子，可能是停牌，

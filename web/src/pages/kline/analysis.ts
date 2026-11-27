@@ -119,17 +119,3 @@ export function extent(values: (number | null)[]): Extent | null {
   return min <= max ? { min, max } : null;
 }
 
-/** 取整齐的刻度。 */
-export function ticks(min: number, max: number, count: number): number[] {
-  if (min === max) {
-    return [min];
-  }
-  const rough = (max - min) / count;
-  const pow = 10 ** Math.floor(Math.log10(rough));
-  const step = [1, 2, 2.5, 5, 10].map((m) => m * pow).find((s) => s >= rough) ?? rough;
-  const out: number[] = [];
-  for (let v = Math.ceil(min / step) * step; v <= max + step * 1e-9; v += step) {
-    out.push(Number(v.toPrecision(12)));
-  }
-  return out;
-}

@@ -79,7 +79,6 @@ export const TEXT = {
   },
 
   chart: {
-    hoverHint: "把鼠标移到图上查看每天的数据",
     ariaLabel: "K 线和成交量",
     missing: "缺失",
     volumeBillion: "亿股",

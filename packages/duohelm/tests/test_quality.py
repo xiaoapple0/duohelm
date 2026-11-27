@@ -274,3 +274,35 @@ def test_adj_factor_jumps_ok_when_matched() -> None:
     c = collector(ex_events=ev)
     c.add_batch(["600000.SH"], EMPTY_BARS, EMPTY_BARS, factors)
     assert c.finish("p")["checks"]["adj_factor_jumps"]["status"] == "ok"
+
+
+def test_delist_date_conflicts_list_both_sources_and_dates() -> None:
+    """精确源说在市而覆盖了别人的退市日：逐只列出两边的数据源和日期；没有时为 ok。"""
+    assert collector().finish("p")["checks"]["delist_date_conflicts"] == {
+        "status": "ok",
+        "count": 0,
+        "examples": [],
+    }
+    conflicts = pl.DataFrame(
+        {
+            "symbol": ["600000.SH", "600005.SH"],
+            "exact_source": ["xtdata", "xtdata"],
+            "exact_delist_date": pl.Series([None, None], dtype=pl.Date()),
+            "exact_confirmed": [True, False],
+            "other_source": ["eltdx", "来源未知"],
+            "other_delist_date": [date(2020, 5, 6), date(2024, 1, 3)],
+        }
+    )
+    report = collector(delist_conflicts=conflicts).finish("xtdata")
+    check = report["checks"]["delist_date_conflicts"]
+    assert check["status"] == "issues" and check["count"] == 2
+    assert check["examples"][0] == {
+        "symbol": "600000.SH",
+        "exact_source": "xtdata",
+        "exact_confirmed": True,
+        "exact_delist_date": None,
+        "other_source": "eltdx",
+        "other_delist_date": "2020-05-06",
+    }
+    assert check["examples"][1]["other_source"] == "来源未知"
+    assert check["examples"][1]["exact_confirmed"] is False

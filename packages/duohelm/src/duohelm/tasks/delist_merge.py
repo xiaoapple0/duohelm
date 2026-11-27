@@ -1,0 +1,226 @@
+"""多个数据源的退市日：精确的优先，近似的不覆盖精确的（xiaoapple0/duohelm-plugins#4）。
+
+同一个快照可以先后被两个数据源写入。数据源声明 ``Capabilities.exact_delist_date`` 为 False
+（如 eltdx）时，它的退市日是近似值，不能覆盖别的数据源给出的精确退市日；精确的数据源
+（如 xtdata）写入时则以它为准。规则只看这个声明，不认插件名字。完整规则表见
+docs/subsystems/data.md 的“多个数据源的退市日”。
+
+精确数据源说在市、已有行是近似数据源（或来源未知）给的退市日时，以精确数据源为准，按在市处理，
+并把两边的数据源和日期交给质量报告（``delist_date_conflicts``）。如果精确数据源漏报了退市，
+这会带来幸存者偏差，所以必须留下记录，方便核对。
+
+精确数据源写的在市行，``exact`` 记 True（“精确数据源确认在市”），和精确的退市日一样受保护：
+之后近似数据源说它已退市，也不覆盖，同样记一条冲突。所以两种同步顺序的结果相同。
+这种保护只管 ``delist_date``、``exact``、``source`` 三项，名称、上市日等其他列仍用这次同步的值
+（ST 状态由名称算，不能停在上一次的名称上）；精确的退市日则保留已有的整行。
+
+本改动之前精确数据源写的在市行 ``exact`` 是 null（和近似数据源写的在市行分不开，平台在同步时
+查不到另一个插件有没有声明 ``exact_delist_date``），所以不能当作精确确认保护；近似数据源说它
+已退市时，按这次的值处理，但记一条“精确性未确认”的冲突，留给人核对。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import polars as pl
+
+_MAX_EXAMPLES = 5
+UNKNOWN_SOURCE = "来源未知"
+"""已有行没有记录来源（``delist_date_quality.source`` 为 null）时，质量报告里写的数据源。"""
+
+
+@dataclass(frozen=True)
+class DelistMerge:
+    securities: pl.DataFrame
+    """这次同步要写的证券（列和输入相同）。保留别人的精确退市日的证券用已有的整行；精确数据源
+    确认在市的证券只有 delist_date 用已有的（在市），其他列用这次的值。"""
+    quality: pl.DataFrame
+    """symbol、exact、source，和 securities 一一对应。"""
+    kept_delisted: list[str]
+    """已有别的数据源给的精确退市日，这次的值（近似的退市日或在市，或精确数据源说在市）丢弃，
+    整行保留。"""
+    reports: pl.DataFrame
+    """要交给质量报告的冲突：symbol、exact_source、exact_delist_date（在市为 null）、other_source
+    （没有记录来源时为“来源未知”）、other_delist_date、exact_confirmed、kind。kind 三种：
+    ``in_market_over_delisted``（精确数据源说在市，覆盖了别人的退市日）、
+    ``delisted_vs_confirmed``（近似数据源说已退市，没能覆盖精确数据源确认的在市）、
+    ``delisted_vs_unconfirmed``（近似数据源说已退市，覆盖了别的数据源写的在市行，那一行
+    exact 为 null，不知道它是不是精确数据源写的：exact_confirmed 为 False）。"""
+    conflicts: list[str]
+    """两个精确数据源的退市日不同：以这次同步的为准。"""
+    delisted_over_in_market: list[str]
+    """精确数据源给出退市日，已有的是另一个精确数据源确认的在市：以这次的为准。"""
+
+
+def merge_delist_dates(
+    new: pl.DataFrame,
+    existing: pl.DataFrame,
+    existing_quality: pl.DataFrame,
+    *,
+    exact: bool,
+    source: str,
+) -> DelistMerge:
+    """合并这次同步的证券和当前快照里已有的。existing、existing_quality 可以为空表。"""
+    columns = new.columns
+    old = existing.join(
+        existing_quality.select(
+            "symbol",
+            pl.col("exact").alias("_e_exact"),
+            pl.col("source").alias("_e_source"),
+        ),
+        on="symbol",
+        how="left",
+    ).select(
+        "symbol",
+        *[pl.col(c).alias(f"_e_{c}") for c in columns if c != "symbol"],
+        "_e_exact",
+        "_e_source",
+    )
+    joined = new.join(old, on="symbol", how="left")
+    e_delisted = pl.col("_e_delist_date").is_not_null()
+    n_delisted = pl.col("delist_date").is_not_null()
+    e_source = pl.col("_e_source")
+    foreign = e_source.is_null() | (e_source != source)
+    # 已有行里 source 为空的精确行不受保护：SDK 0.4.1 之前的近似数据源写出的也是 exact=True
+    # 别人的精确行：精确的退市日，或精确数据源确认在市（exact 为 True 而没有退市日）
+    foreign_exact = (
+        pl.col("_e_exact").fill_null(False) & e_source.is_not_null() & (e_source != source)
+    )
+    exact_wins = pl.lit(exact)
+    # 别人的精确退市日：近似的这次不覆盖，精确的这次说在市也不覆盖；整行保留
+    keep_delisted = foreign_exact & e_delisted & (~exact_wins | ~n_delisted)
+    # 精确数据源确认的在市：近似的这次不覆盖，只保护 delist_date、exact、source
+    keep_in_market = foreign_exact & ~e_delisted & ~exact_wins
+    # 精确源说在市，已有行是别的数据源（或来源未知）给的、没有被保留的退市日：以精确源为准
+    in_market = exact_wins & ~n_delisted & e_delisted & foreign & ~keep_delisted
+    # 近似的这次说已退市，已有的是别的数据源写的、exact 为 null 的在市行：不知道它是不是精确的
+    unconfirmed = (
+        ~exact_wins
+        & n_delisted
+        & ~e_delisted
+        & pl.col("_e_exact").is_null()
+        & e_source.is_not_null()
+        & (e_source != source)
+    )
+    flagged = joined.with_columns(
+        keep_delisted.fill_null(False).alias("_keep_delisted"),
+        keep_in_market.fill_null(False).alias("_keep_in_market"),
+        in_market.fill_null(False).alias("_in_market"),
+        (
+            exact_wins
+            & n_delisted
+            & foreign_exact
+            & e_delisted
+            & pl.col("delist_date").ne_missing(pl.col("_e_delist_date"))
+        )
+        .fill_null(False)
+        .alias("_conflict"),
+        (exact_wins & n_delisted & foreign_exact & ~e_delisted)
+        .fill_null(False)
+        .alias("_delisted_over_in_market"),
+        (keep_in_market & n_delisted).fill_null(False).alias("_vs_confirmed"),
+        unconfirmed.fill_null(False).alias("_vs_unconfirmed"),
+    )
+    kd, kim = pl.col("_keep_delisted"), pl.col("_keep_in_market")
+    merged = flagged.select(
+        "symbol",
+        *[
+            pl.when(kd).then(pl.col(f"_e_{c}")).otherwise(pl.col(c)).alias(c)
+            for c in columns
+            if c not in ("symbol", "delist_date")
+        ],
+        pl.when(kd | kim)
+        .then(pl.col("_e_delist_date"))
+        .otherwise(pl.col("delist_date"))
+        .alias("delist_date"),
+        pl.when(kd | kim)
+        .then(pl.col("_e_exact"))
+        # 精确数据源写的在市行也记 True：精确数据源确认在市；近似数据源写的在市行为 null
+        .otherwise(
+            pl.when(n_delisted | exact_wins)
+            .then(pl.lit(exact))
+            .otherwise(pl.lit(None, dtype=pl.Boolean()))
+        )
+        .alias("exact"),
+        pl.when(kd | kim).then(e_source).otherwise(pl.lit(source)).alias("source"),
+        "_keep_delisted",
+        "_in_market",
+        "_conflict",
+        "_delisted_over_in_market",
+        "_vs_confirmed",
+        "_vs_unconfirmed",
+        pl.col("_e_source").fill_null(UNKNOWN_SOURCE).alias("_e_source_name"),
+        pl.col("_e_source").alias("_e_source_raw"),
+        pl.col("_e_delist_date"),
+        pl.col("delist_date").alias("_n_delist_date"),
+    )
+    no_date = pl.lit(None, dtype=pl.Date()).alias("exact_delist_date")
+
+    def report(
+        flag: str,
+        kind: str,
+        exact_source: pl.Expr,
+        other_source: pl.Expr,
+        other_date: pl.Expr,
+        *,
+        confirmed: bool,
+    ) -> pl.DataFrame:
+        return merged.filter(pl.col(flag)).select(
+            "symbol",
+            exact_source.alias("exact_source"),
+            no_date,
+            other_source.alias("other_source"),
+            other_date.alias("other_delist_date"),
+            pl.lit(confirmed).alias("exact_confirmed"),
+            pl.lit(kind).alias("kind"),
+        )
+
+    this, name = pl.lit(source), pl.col("_e_source_name")
+    reports = pl.concat(
+        [
+            report(
+                "_in_market",
+                "in_market_over_delisted",
+                this,
+                name,
+                pl.col("_e_delist_date"),
+                confirmed=True,
+            ),
+            report(
+                "_vs_confirmed",
+                "delisted_vs_confirmed",
+                pl.col("_e_source_raw"),
+                this,
+                pl.col("_n_delist_date"),
+                confirmed=True,
+            ),
+            report(
+                "_vs_unconfirmed",
+                "delisted_vs_unconfirmed",
+                pl.col("_e_source_raw"),
+                this,
+                pl.col("_n_delist_date"),
+                confirmed=False,
+            ),
+        ]
+    ).sort("symbol")
+
+    def symbols(flag: str) -> list[str]:
+        return merged.filter(pl.col(flag)).get_column("symbol").sort().to_list()
+
+    return DelistMerge(
+        securities=merged.select(columns),
+        quality=merged.select("symbol", "exact", "source"),
+        kept_delisted=symbols("_keep_delisted"),
+        reports=reports,
+        conflicts=symbols("_conflict"),
+        delisted_over_in_market=symbols("_delisted_over_in_market"),
+    )
+
+
+def examples(symbols: list[str]) -> list[str]:
+    return symbols[:_MAX_EXAMPLES]
+
+
+__all__ = ["UNKNOWN_SOURCE", "DelistMerge", "examples", "merge_delist_dates"]

@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef } from "react";
 import { BarChart, CandlestickChart, ScatterChart } from "echarts/charts";
 import {
   GridComponent,
-  MarkAreaComponent,
   MarkLineComponent,
   TooltipComponent,
 } from "echarts/components";
@@ -19,7 +18,6 @@ echarts.use([
   CandlestickChart,
   ScatterChart,
   GridComponent,
-  MarkAreaComponent,
   MarkLineComponent,
   TooltipComponent,
   CanvasRenderer,

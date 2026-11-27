@@ -207,3 +207,14 @@ def test_missing_non_added_column_is_an_error(
     assert full.added_columns == ("observed_at",)
     with pytest.raises(pl.exceptions.PolarsError):
         store.read("st_daily")
+
+
+def test_extra_column_in_file_is_dropped(store: DataStore) -> None:
+    """文件里多出来、schema 没有的列读取时丢弃，不影响生效的数据。"""
+    put(store, st_rows(date(2024, 1, 4), at(1, 4, 16), ["000001.SZ"]))
+    entry = store.manifest(store.head()).datasets["st_daily"][0]
+    path = store.files_dir / entry.path
+    pl.read_parquet(path).with_columns(pl.lit("x").alias("extra")).write_parquet(path)
+    df = store.read("st_daily")
+    assert df.columns == list(datasets_module.ST_DAILY_SCHEMA)
+    assert df.get_column("symbol").to_list() == ["000001.SZ"]

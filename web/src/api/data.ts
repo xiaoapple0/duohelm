@@ -43,6 +43,49 @@ export interface BarsOut {
   bars: Bar[];
 }
 
+export interface Snapshot {
+  id: string;
+  parent: string | null;
+  /** 带时区的 ISO 时间 */
+  created_at: string;
+  task_id: number | null;
+  note: string | null;
+  stats: Record<string, unknown>;
+  is_current: boolean;
+}
+
+export interface SnapshotsOut {
+  current: string | null;
+  snapshots: Snapshot[];
+}
+
+/** 没有日线的证券：bar_count 为 0，其余统计为 null（未知，不是 0）。 */
+export interface CoverageRow {
+  symbol: string;
+  name: string | null;
+  kind: string | null;
+  first_date: string | null;
+  last_date: string | null;
+  bar_count: number;
+  expected_days: number | null;
+  /** 按 CN 交易日历在首末日期之间应有而缺失的天数，停牌日也算缺失 */
+  missing_days: number | null;
+  off_calendar_bars: number | null;
+}
+
+export interface CoverageOut {
+  snapshot: string;
+  total: number;
+  items: CoverageRow[];
+}
+
+export interface CoverageQuery {
+  snapshot?: string;
+  kind?: string;
+  limit?: number;
+  offset?: number;
+}
+
 export interface SecuritiesQuery {
   snapshot?: string;
   symbol?: string;
@@ -60,6 +103,8 @@ export interface BarsQuery {
 }
 
 export const dataApi = {
+  snapshots: (limit = 200) => getJson<SnapshotsOut>(`/api/data/snapshots${query({ limit })}`),
+  coverage: (q: CoverageQuery = {}) => getJson<CoverageOut>(`/api/data/coverage${query({ ...q })}`),
   securities: (q: SecuritiesQuery = {}) =>
     getJson<SecuritiesOut>(`/api/data/securities${query({ ...q })}`),
   bars: (symbol: string, q: BarsQuery = {}) =>

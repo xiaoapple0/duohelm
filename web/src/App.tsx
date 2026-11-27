@@ -2,6 +2,7 @@ import {
   ApiOutlined,
   AppstoreOutlined,
   BarChartOutlined,
+  CheckSquareOutlined,
   DashboardOutlined,
   ExperimentOutlined,
   FunctionOutlined,
@@ -15,6 +16,7 @@ import { Layout, Menu, Typography } from "antd";
 import type { ReactNode } from "react";
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
+import CoveragePage from "./pages/coverage/CoveragePage";
 import KlinePage from "./pages/kline/KlinePage";
 import OverviewPage from "./pages/OverviewPage";
 import PlaceholderPage from "./pages/PlaceholderPage";
@@ -39,7 +41,7 @@ const NAV: NavItem[] = [
       <PlaceholderPage
         title="行情管理"
         milestone="M1"
-        description="配置数据源、同步行情、查看数据覆盖和质量。K 线查看已是独立页面（/kline）。"
+        description="配置数据源、同步行情、查看数据质量。K 线查看（/kline）和覆盖情况（/coverage）已是独立页面。"
       />
     ),
   },
@@ -105,6 +107,7 @@ const NAV: NavItem[] = [
     ),
   },
   { path: "/kline", label: "K 线查看", icon: <BarChartOutlined />, element: <KlinePage /> },
+  { path: "/coverage", label: "覆盖情况", icon: <CheckSquareOutlined />, element: <CoveragePage /> },
   { path: "/plugins", label: "插件", icon: <ApiOutlined />, element: <PluginsPage /> },
   {
     path: "/tasks",

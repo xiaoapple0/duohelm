@@ -290,7 +290,13 @@ def _run(
     if not caps.exact_delist_date:
         ctx.log(f"插件 {plugin_id} 的退市日是近似值，记进 delist_date_quality")
     dropped = 0
-    collector = QualityCollector(calendar, securities, start, end)
+    collector = QualityCollector(
+        calendar,
+        securities,
+        start,
+        end,
+        delist_quality=delist_date_quality(securities, caps),
+    )
     batches = [symbols[i : i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
     try:
         with data.transaction(

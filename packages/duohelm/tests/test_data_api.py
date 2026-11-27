@@ -79,3 +79,12 @@ def test_report_endpoint_is_read_only(tmp_path: Path) -> None:
         f"/api/data/snapshots/{snap}/quality-report", headers={"Origin": LOCAL}, json={}
     )
     assert resp.status_code == 405
+
+
+def test_health_works_when_data_dir_is_broken(tmp_path: Path) -> None:
+    """数据目录有问题（这里是一个同名文件）不能影响启动和 health：DataStore 按请求构造。"""
+    settings = Settings(home=tmp_path)
+    settings.data_dir.parent.mkdir(parents=True, exist_ok=True)
+    settings.data_dir.write_text("不是目录", encoding="utf-8")
+    client = TestClient(create_app(settings), base_url=LOCAL)
+    assert client.get("/api/health").status_code == 200

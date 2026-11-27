@@ -98,7 +98,7 @@ def create_app(
     app.include_router(task_router(store, task_types))
     app.include_router(schedule_router(schedules, scheduler, registry.scan))
     app.include_router(plugin_router(registry, endpoints))
-    app.include_router(data_router(DataStore(settings.data_dir)))
+    app.include_router(data_router(lambda: DataStore(settings.data_dir)))
 
     def health() -> HealthResponse:
         return HealthResponse(status="ok", version=__version__, sdk_version=SDK_VERSION)

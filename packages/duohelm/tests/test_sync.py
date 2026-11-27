@@ -1208,7 +1208,8 @@ def test_clean_data_report_is_saved_with_snapshot(settings: Settings) -> None:
     assert missing["suspension"] == "unknown"
     assert missing["missing_total"] == 0
     assert missing["placeholder_total"] == 1
-    assert missing["per_symbol"] == [{"symbol": "000001.SZ", "missing": 0, "placeholder": 1}]
+    assert missing["symbols_with_placeholder"] == 1
+    assert missing["per_symbol"] == []  # 只列出有缺失的证券
     assert report["trading_days"] == 4 and report["symbols"] == 4
 
 
@@ -1238,9 +1239,9 @@ def test_bad_data_is_reported_but_not_blocked(settings: Settings) -> None:
     assert checks["calendar_dates"]["rows_not_in_calendar"] == 3
     # 600000.SH 缺 01-03；日历里没有 01-04，所以那天不算应有的交易日
     assert checks["missing_days"]["per_symbol"] == [
-        {"symbol": "000001.SZ", "missing": 0, "placeholder": 1},
         {"symbol": "600000.SH", "missing": 1, "placeholder": 0},
     ]
+    assert checks["missing_days"]["placeholder_total"] == 1
 
 
 def test_rerun_with_same_report_writes_no_snapshot(settings: Settings) -> None:

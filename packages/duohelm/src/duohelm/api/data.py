@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from typing import Any
 
 import polars as pl
@@ -30,7 +31,7 @@ def read_quality_report(data: DataStore, snapshot_id: str) -> dict[str, Any] | N
     return report  # pyright: ignore[reportUnknownVariableType]
 
 
-def data_router(data: DataStore) -> APIRouter:
+def data_router(open_store: Callable[[], DataStore]) -> APIRouter:
     router = APIRouter()
 
     def get_quality_report(snapshot_id: str) -> dict[str, Any]:
@@ -38,7 +39,9 @@ def data_router(data: DataStore) -> APIRouter:
         if not _SNAPSHOT_ID.fullmatch(snapshot_id):
             raise HTTPException(404, f"找不到快照 {snapshot_id}")
         try:
-            report = read_quality_report(data, snapshot_id)
+            report = read_quality_report(
+                open_store(), snapshot_id
+            )  # 按请求构造，不在启动时碰数据目录
         except SnapshotNotFoundError:
             raise HTTPException(404, f"找不到快照 {snapshot_id}") from None
         if report is None:

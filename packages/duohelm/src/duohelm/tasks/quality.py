@@ -2,7 +2,7 @@
 
 设计见 docs/subsystems/data.md 的“入库质量报告”一节。要点：
 
-- 只报告，不阻止提交。哪些问题要阻止由维护者决定（#67）
+- 只报告，不阻止提交。哪些问题要阻止由维护者决定（#72）
 - 检查的范围是这次同步取到的数据（[start, end] 内的日线，从 1990-12-19 起的复权因子），
   不是整个快照；增量同步只检查新取的那一段
 - 拿不到检查所需的数据时，那一项的状态是 ``unavailable``，写明原因，**不是** ``ok``：
@@ -48,9 +48,21 @@ class QualityCollector:
         *,
         ex_events: pl.DataFrame | None = None,
         ex_events_missing_reason: str = "数据源没有提供除权除息记录",
+        delist_quality: pl.DataFrame | None = None,
     ) -> None:
         self._calendar = calendar.select("date").unique()
         self._securities = securities.select("symbol", "list_date", "delist_date")
+        # 退市日不精确（exact 为 False）或不知道（有退市日但没有记录）的证券：上界是近似值
+        quality = (
+            delist_quality.select("symbol", "exact")
+            if delist_quality is not None
+            else pl.DataFrame(schema={"symbol": pl.String(), "exact": pl.Boolean()})
+        )
+        self._inexact = (
+            self._securities.join(quality, on="symbol", how="left")
+            .filter(pl.col("delist_date").is_not_null() & (pl.col("exact") != True))  # noqa: E712
+            .select("symbol", pl.col("exact").alias("delist_date_exact"))
+        )
         self._start = start
         self._end = end
         self._events = ex_events
@@ -70,6 +82,9 @@ class QualityCollector:
         # 缺失的交易日
         self._missing: list[dict[str, Any]] = []
         self._expected_days = 0
+        self._placeholder_total = 0
+        self._placeholder_symbols = 0
+        self._inexact_symbols = 0
         # 复权跳变
         self._factor_rows = 0
         self._no_event: list[dict[str, Any]] = []
@@ -98,14 +113,14 @@ class QualityCollector:
     def _check_ohlc(self, bars: pl.DataFrame) -> None:
         o, h, low, c = (pl.col(p) for p in _PRICES)
         any_price = pl.any_horizontal(*(pl.col(p).is_null() | pl.col(p).is_nan() for p in _PRICES))
+        non_positive = pl.any_horizontal(*(pl.col(p) <= 0 for p in _PRICES)).fill_null(False)
+        # 价格缺失或非正的行，高低价的比较没有意义，只记前两类
+        comparable = ~any_price & ~non_positive
         flags = {
             "missing_price": any_price,
-            "non_positive_price": pl.any_horizontal(*(pl.col(p) <= 0 for p in _PRICES)).fill_null(
-                False
-            ),
-            # 价格缺失或非正的行，高低价的比较没有意义，只记前两类
-            "high_below_open_close": (~any_price) & (h < pl.max_horizontal(o, c)),
-            "low_above_open_close": (~any_price) & (low > pl.min_horizontal(o, c)),
+            "non_positive_price": non_positive,
+            "high_below_open_close": comparable & (h < pl.max_horizontal(o, c)),
+            "low_above_open_close": comparable & (low > pl.min_horizontal(o, c)),
         }
         marked = bars.select("symbol", "date", **flags)
         bad = marked.filter(pl.any_horizontal(*flags.keys()))
@@ -162,8 +177,24 @@ class QualityCollector:
             pl.col("missing").fill_null(0),
             pl.col("placeholder").fill_null(0),
         )
-        merged = merged.filter((pl.col("missing") > 0) | (pl.col("placeholder") > 0))
-        self._missing += merged.sort("symbol").to_dicts()
+        self._placeholder_total += int(merged.get_column("placeholder").sum())
+        self._placeholder_symbols += int((merged.get_column("placeholder") > 0).sum())
+        inexact = self._inexact.filter(pl.col("symbol").is_in(list(symbols)))
+        self._inexact_symbols += inexact.height
+        # per_symbol 只保留缺失的证券；占位行只记总数
+        merged = (
+            merged.filter(pl.col("missing") > 0)
+            .join(inexact, on="symbol", how="left")
+            .with_columns(
+                pl.col("symbol").is_in(inexact.get_column("symbol").to_list()).alias("_flag")
+            )
+        )
+        rows = merged.sort("symbol").to_dicts()
+        for r in rows:
+            if r.pop("_flag"):
+                r["delist_date_approximate"] = True  # 缺失天数可能少算
+            r.pop("delist_date_exact", None)
+        self._missing += rows
 
     def _check_factors(self, symbols: Sequence[str], factors: pl.DataFrame) -> None:
         self._factor_rows += factors.height
@@ -195,7 +226,6 @@ class QualityCollector:
         ohlc_status: Status = "issues" if self._ohlc_rows else "ok"
         cal_status: Status = "issues" if self._cal_rows else "ok"
         missing_total = sum(m["missing"] for m in self._missing)
-        placeholder_total = sum(m["placeholder"] for m in self._missing)
         if self._events is None:
             adj: dict[str, Any] = {
                 "status": "unavailable",
@@ -247,8 +277,14 @@ class QualityCollector:
                     ),
                     "expected_days": self._expected_days,
                     "missing_total": missing_total,
-                    "placeholder_total": placeholder_total,
-                    "symbols_with_missing": sum(1 for m in self._missing if m["missing"]),
+                    "placeholder_total": self._placeholder_total,
+                    "symbols_with_placeholder": self._placeholder_symbols,
+                    "symbols_with_missing": len(self._missing),
+                    # 退市日不精确（数据源拿不到摘牌日，如 eltdx）的证券数：它们的退市日是
+                    # 最后一根有成交的 K 线的日期，是下界；应有的交易日截到这里，之后的缺口
+                    # 看不到，缺失天数可能少算。出现在 per_symbol 里的会标
+                    # delist_date_approximate
+                    "symbols_with_approximate_delist_date": self._inexact_symbols,
                     "per_symbol": self._missing,
                 },
             },

@@ -49,16 +49,23 @@ def test_ohlc_rules() -> None:
     zero = row(D[1], "600005.SH", 0, 0, 0, 0)
     nan = row(D[2], "600005.SH", float("nan"), 11, 9, 10.5)
     null = row(D[3], "688001.SH", None, 11, 9, 10.5)
+    # 价格非正、高低价也不一致（high 低于 close，low 高于 open）：只计入 non_positive_price
+    neg_and_inconsistent = row(D[0], "688001.SH", 5, -2, 8, 3)
     c = collector()
     c.add_batch(["600000.SH"], bars(good, flat, high_low, low_high), EMPTY_BARS, NO_FACTORS)
-    c.add_batch(["600005.SH", "688001.SH"], bars(negative, zero, nan, null), EMPTY_BARS, NO_FACTORS)
+    c.add_batch(
+        ["600005.SH", "688001.SH"],
+        bars(negative, zero, nan, null, neg_and_inconsistent),
+        EMPTY_BARS,
+        NO_FACTORS,
+    )
     ohlc = c.finish("p")["checks"]["ohlc"]
     assert ohlc["status"] == "issues"
-    assert ohlc["rows_checked"] == 8
-    assert ohlc["rows_with_issues"] == 6
+    assert ohlc["rows_checked"] == 9
+    assert ohlc["rows_with_issues"] == 7
     assert ohlc["issues"] == {
         "missing_price": 2,
-        "non_positive_price": 2,
+        "non_positive_price": 3,
         "high_below_open_close": 1,
         "low_above_open_close": 1,
     }
@@ -70,7 +77,10 @@ def test_ohlc_rules() -> None:
         ("600005.SH", "2024-01-03"),
         ("600005.SH", "2024-01-04"),
         ("688001.SH", "2024-01-05"),
+        ("688001.SH", "2024-01-02"),
     }
+    by_key = {(e["symbol"], e["date"]): e["problems"] for e in ohlc["examples"]}
+    assert by_key[("688001.SH", "2024-01-02")] == ["non_positive_price"]
 
 
 def test_clean_ohlc_is_ok_and_examples_are_capped() -> None:
@@ -141,11 +151,42 @@ def test_missing_days_respect_listing_and_placeholders() -> None:
     assert missing["expected_days"] == 4 + 2 + 2
     assert missing["missing_total"] == 2
     assert missing["placeholder_total"] == 1
+    assert missing["symbols_with_placeholder"] == 1
     assert missing["per_symbol"] == [
         {"symbol": "600000.SH", "missing": 1, "placeholder": 1},
         {"symbol": "688001.SH", "missing": 1, "placeholder": 0},
     ]
     assert missing["symbols_with_missing"] == 2
+
+
+def test_approximate_delist_date_is_flagged() -> None:
+    """退市日不精确的证券：缺失天数可能少算，在报告里标注；精确的不标。"""
+    quality = pl.DataFrame(
+        {"symbol": ["600000.SH", "600005.SH"], "exact": [None, False]},
+        schema={"symbol": pl.String(), "exact": pl.Boolean()},
+    )
+    c = collector(delist_quality=quality)
+    # 600005.SH 退市日 01-03（近似），应有 01-02、01-03，只有 01-02 -> 缺 1
+    c.add_batch(
+        ["600000.SH", "600005.SH"],
+        bars(row(D[0], "600005.SH", 10, 11, 9, 10)),
+        EMPTY_BARS,
+        NO_FACTORS,
+    )
+    missing = c.finish("p")["checks"]["missing_days"]
+    assert missing["symbols_with_approximate_delist_date"] == 1
+    flagged = {m["symbol"]: m.get("delist_date_approximate") for m in missing["per_symbol"]}
+    assert flagged == {"600000.SH": None, "600005.SH": True}
+
+    exact = pl.DataFrame(
+        {"symbol": ["600005.SH"], "exact": [True]},
+        schema={"symbol": pl.String(), "exact": pl.Boolean()},
+    )
+    c = collector(delist_quality=exact)
+    c.add_batch(["600005.SH"], bars(row(D[0], "600005.SH", 10, 11, 9, 10)), EMPTY_BARS, NO_FACTORS)
+    missing = c.finish("p")["checks"]["missing_days"]
+    assert missing["symbols_with_approximate_delist_date"] == 0
+    assert "delist_date_approximate" not in missing["per_symbol"][0]
 
 
 def test_symbol_without_any_bars_misses_all_expected_days() -> None:

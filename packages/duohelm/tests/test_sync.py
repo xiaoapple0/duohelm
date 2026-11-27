@@ -1696,3 +1696,15 @@ def test_approximate_in_market_replaces_other_approximate_source(settings: Setti
     assert delist_rows(settings)["600000.SH"] == (date(2020, 5, 6), False, "fake-approx-2")
     sync_as(settings, APPROX, approx_dir, exact_delist_date=False)
     assert delist_rows(settings)["600000.SH"] == (None, None, APPROX)
+
+
+def test_unknown_source_exact_row_stays_delisted_when_exact_source_says_in_market(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧快照里 exact=True、source 为空的退市行可能是“假精确”：精确源说在市也保留为已退市。"""
+    exact_dir, _ = two_sources(settings)
+    seed_legacy_snapshot(settings, monkeypatch)
+    store, task_id = sync_as(settings, EXACT, exact_dir, delist_now={"600005.SH": None})
+    assert delist_rows(settings)["600005.SH"] == (date(2024, 1, 3), False, None)
+    warning = [m.message for m in store.logs(task_id) if m.level == "warning"]
+    assert any("按已退市处理" in m and "600005.SH" in m for m in warning)

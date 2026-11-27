@@ -69,7 +69,10 @@ def merge_delist_dates(
     foreign_approx = e_delisted & ~pl.col("_e_exact").fill_null(False) & foreign
     exact_wins = pl.lit(exact)
     keep_exact = foreign_exact & ((~n_delisted) | ~exact_wins)
-    keep_delisted = exact_wins & ~n_delisted & foreign_approx
+    # 来源未知的已退市行（不管 exact 是什么）也保留：它可能是 SDK 0.4.1 之前的近似数据源写出的
+    # “假精确”。不知道它是不是精确，不能因为精确源说在市就改成在市
+    unknown_source = e_delisted & pl.col("_e_source").is_null()
+    keep_delisted = exact_wins & ~n_delisted & (foreign_approx | unknown_source)
     flagged = joined.with_columns(
         keep_exact.fill_null(False).alias("_keep_exact"),
         keep_delisted.fill_null(False).alias("_keep_delisted"),
@@ -91,7 +94,12 @@ def merge_delist_dates(
             if c != "symbol"
         ],
         pl.when(keep)
-        .then(pl.col("_e_exact"))
+        .then(
+            # 来源未知的“精确”行不能当精确：保留时记为近似
+            pl.when(pl.col("_e_exact").fill_null(False) & pl.col("_e_source").is_null())
+            .then(pl.lit(False))
+            .otherwise(pl.col("_e_exact"))
+        )
         .otherwise(
             pl.when(n_delisted).then(pl.lit(exact)).otherwise(pl.lit(None, dtype=pl.Boolean()))
         )

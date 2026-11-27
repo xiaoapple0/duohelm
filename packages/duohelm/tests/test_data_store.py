@@ -379,5 +379,5 @@ def test_catalog_v1_migrates_and_keeps_old_scan_table(tmp_path: Path) -> None:
     assert catalog.unscanned("a", ["600001.SH"]) == ["600001.SH"]
     conn = sqlite3.connect(path)
     assert conn.execute("SELECT symbol FROM security_scan_v1").fetchall() == [("600001.SH",)]
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     conn.close()

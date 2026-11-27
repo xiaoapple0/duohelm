@@ -64,6 +64,10 @@ export interface CoverageRow {
   symbol: string;
   name: string | null;
   kind: string | null;
+  /** null：未知（证券列表里没有这个代码），不要按代码前缀猜 */
+  exchange: string | null;
+  /** null：没有退市日，或证券列表里没有这个代码（此时 exchange 也是 null） */
+  delist_date: string | null;
   first_date: string | null;
   last_date: string | null;
   bar_count: number;
@@ -77,6 +81,29 @@ export interface CoverageOut {
   snapshot: string;
   total: number;
   items: CoverageRow[];
+}
+
+/** 汇总的一个分组。exchange、kind、status 为 null 都表示“未知”，单独成组。 */
+export interface CoverageGroup {
+  exchange: string | null;
+  kind: string | null;
+  /** null：未知（证券列表里没有这个代码） */
+  status: "listed" | "delisted" | null;
+  securities: number;
+  with_bars: number;
+  no_bars: number;
+  bar_count: number;
+  with_missing: number;
+  missing_days: number;
+  off_calendar_bars: number;
+}
+
+export interface CoverageSummaryOut {
+  snapshot: string;
+  /** 判定在市/退市用的北京日期 */
+  as_of: string;
+  total: number;
+  groups: CoverageGroup[];
 }
 
 export interface CoverageQuery {
@@ -105,6 +132,8 @@ export interface BarsQuery {
 export const dataApi = {
   snapshots: (limit = 200) => getJson<SnapshotsOut>(`/api/data/snapshots${query({ limit })}`),
   coverage: (q: CoverageQuery = {}) => getJson<CoverageOut>(`/api/data/coverage${query({ ...q })}`),
+  coverageSummary: (snapshot?: string) =>
+    getJson<CoverageSummaryOut>(`/api/data/coverage/summary${query({ snapshot })}`),
   securities: (q: SecuritiesQuery = {}) =>
     getJson<SecuritiesOut>(`/api/data/securities${query({ ...q })}`),
   bars: (symbol: string, q: BarsQuery = {}) =>

@@ -270,7 +270,9 @@ def _run(
         securities = known_securities(scan.securities).sort("symbol")
         scanned, rescanned, rechecked = scan.scanned, scan.rescanned, scan.rechecked
         base = 0.3
-    securities, delist_quality = _merge_delist_dates(ctx, data, securities, caps, plugin_id)
+    securities, delist_quality, merge_base = _merge_delist_dates(
+        ctx, data, securities, caps, plugin_id
+    )
     ctx.progress(base, "交易日历")
     calendar = fetch_calendar(session, start, end)
     symbols = symbols_in_range(securities, start, end)
@@ -306,8 +308,9 @@ def _run(
         with data.transaction(
             task_id=ctx.task_id, note=f"data.sync {plugin_id} {start}..{end}"
         ) as tx:
-            written["securities"] = tx.write("securities", securities)
-            written["delist_date_quality"] = tx.write("delist_date_quality", delist_quality)
+            written["securities"], written["delist_date_quality"] = _write_securities(
+                tx, merge_base, securities, delist_quality
+            )
             written["calendar"] = tx.write("calendar", calendar)
             written |= _write_snapshots(tx, data, snap)
             for i, batch in enumerate(batches):
@@ -527,21 +530,24 @@ def redact(message: str, addresses: Mapping[str, str]) -> str:
 
 def _merge_delist_dates(
     ctx: TaskContext, data: DataStore, securities: pl.DataFrame, caps: Capabilities, source: str
-) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """和当前快照里已有的证券合并退市日（精确的优先，见 delist_merge），返回 (证券, 质量)。
+) -> tuple[pl.DataFrame, pl.DataFrame, str | None]:
+    """和当前快照里已有的证券合并退市日（精确的优先，见 delist_merge）。
 
-    质量每只证券一行：有退市日的按数据源的声明记精确或近似，仍在市的为 null。
+    返回 (证券, 质量, 读取的快照 id)。质量每只证券一行：有退市日的按数据源的声明记精确或
+    近似，仍在市的为 null。读的是固定的快照（不是“当前快照”）：写入时事务的基础快照必须
+    还是它，见 :func:`_write_securities`。
     """
     if not caps.exact_delist_date:
         ctx.log(f"插件 {source} 的退市日是近似值，记进 delist_date_quality")
-    if data.head() is None:
+    head = data.head()
+    if head is None:
         existing, existing_quality = (
             securities.clear(),
             pl.DataFrame(schema=DATASETS["delist_date_quality"].schema),
         )
     else:
-        existing = data.read("securities")
-        existing_quality = data.read("delist_date_quality")
+        existing = data.read("securities", snapshot=head)
+        existing_quality = data.read("delist_date_quality", snapshot=head)
     merged = merge_delist_dates(
         securities, existing, existing_quality, exact=caps.exact_delist_date, source=source
     )
@@ -553,7 +559,9 @@ def _merge_delist_dates(
     if merged.kept_delisted:
         ctx.log(
             f"{len(merged.kept_delisted)} 只证券这次的数据源说在市，但已有的退市日（近似值）"
-            f"说已退市：不知道谁对，按已退市处理，例如 {examples(merged.kept_delisted)}",
+            "说已退市：不知道谁对，按已退市处理。如果近似值是错的，这些证券在近似退市日之后"
+            "的全部交易日都不在股票池里（近似退市日早于 start 的，这次不取它们的日线），"
+            f"可能长达数年，例如 {examples(merged.kept_delisted)}",
             "warning",
         )
     if merged.conflicts:
@@ -562,7 +570,22 @@ def _merge_delist_dates(
             f"例如 {examples(merged.conflicts)}",
             "warning",
         )
-    return merged.securities, merged.quality
+    return merged.securities, merged.quality, head
+
+
+def _write_securities(
+    tx: Transaction, merge_base: str | None, securities: pl.DataFrame, quality: pl.DataFrame
+) -> tuple[int, int]:
+    """写证券列表和退市日质量。合并时读的快照必须就是事务的基础快照。
+
+    合并在事务之外读已有的行；这之间别的同步（任务可以并行）提交了新快照的话，合并没看到
+    它写的精确退市日，会用近似值覆盖掉，而且提交时不会冲突。所以这里不一致就重试。
+    """
+    if tx.base != merge_base:
+        raise RetryableError(
+            f"合并退市日之后当前快照被别的写入改变了（{merge_base} 变为 {tx.base}），重新同步"
+        )
+    return tx.write("securities", securities), tx.write("delist_date_quality", quality)
 
 
 def check_capabilities(plugin_id: str, caps: Any) -> Capabilities:

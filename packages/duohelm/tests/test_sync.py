@@ -21,9 +21,12 @@ from duohelm.registry import PluginRegistry
 from duohelm.settings import Settings
 from duohelm.storage import DataStore, SnapshotConflictError
 from duohelm.storage import catalog as catalog_module
+from duohelm.storage import datasets as datasets_module
 from duohelm.tasks import RetryableError, TaskStore, TaskTypeRegistry, Worker, delisted
+from duohelm.tasks.delist_merge import merge_delist_dates
 from duohelm.tasks.sync import SyncParams, SyncResult, data_sync, last_closed_day
 from duohelm.tasks.sync import _plugin_errors as plugin_errors  # pyright: ignore[reportPrivateUsage]
+from duohelm_sdk.schema import SECURITIES_SCHEMA
 
 FAST = Limits(call_timeout_s=60, startup_timeout_s=60, poll_interval_s=0.1)
 START, END = date(2024, 1, 2), date(2024, 1, 5)
@@ -1576,3 +1579,120 @@ def test_own_rows_are_replaced_by_the_same_source(settings: Settings) -> None:
     sync_as(settings, EXACT, exact_dir)
     sync_as(settings, EXACT, exact_dir, **approx(delist_now={"600005.SH": "2023-12-20"}))
     assert delist_rows(settings)["600005.SH"] == (date(2023, 12, 20), False, EXACT)
+
+
+def sec_row(symbol: str, name: str, listed: date, delisted: date | None) -> pl.DataFrame:
+    return pl.DataFrame(
+        [(symbol, name, symbol[-2:], "stock", listed, delisted)],
+        schema=SECURITIES_SCHEMA,
+        orient="row",
+    )
+
+
+def seed_legacy_snapshot(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SDK 0.4.1 之后、source 列出现之前写的快照：delist_date_quality 没有 source 列。
+
+    600005.SH 退市日精确（来源未知）；600001.SH 有退市日但没有质量行（exact 为 null）；
+    600000.SH 的退市日近似、来源是另一个近似源；000001.SZ 近似、来源未知。
+    """
+    old = datasets_module.Dataset(
+        "delist_date_quality", {"symbol": pl.String(), "exact": pl.Boolean()}, ("symbol",)
+    )
+    rows = [
+        sec_row("600005.SH", "武钢股份", date(1999, 8, 3), date(2024, 1, 3)),
+        sec_row("600001.SH", "邯郸钢铁", date(1998, 1, 22), date(2009, 12, 25)),
+        sec_row("600000.SH", "浦发银行", date(1999, 11, 10), date(2020, 5, 6)),
+        sec_row("000001.SZ", "平安银行", date(1991, 4, 3), date(2019, 1, 1)),
+    ]
+    quality = pl.DataFrame(
+        {"symbol": ["600005.SH", "600000.SH", "000001.SZ"], "exact": [True, False, False]}
+    )
+    with monkeypatch.context() as m:
+        m.setitem(datasets_module.DATASETS, "delist_date_quality", old)
+        with DataStore(settings.data_dir).transaction(note="legacy") as tx:
+            tx.write("securities", pl.concat(rows))
+            tx.write("delist_date_quality", quality)
+    data = DataStore(settings.data_dir)
+    assert (
+        "source"
+        not in pl.read_parquet(
+            next((settings.data_dir / "files" / "delist_date_quality").rglob("*.parquet"))
+        ).columns
+    )
+    assert data.read("delist_date_quality").get_column("source").null_count() == 3
+
+
+def test_legacy_rows_without_source_approximate_source(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧快照（没有 source 列）：来源未知的精确行不受保护；近似源说在市时近似退市日以这次为准。"""
+    _, approx_dir = two_sources(settings)
+    seed_legacy_snapshot(settings, monkeypatch)
+    sync_as(settings, APPROX, approx_dir, **approx(delist_now={"600005.SH": "2024-01-02"}))
+    rows = delist_rows(settings)
+    assert rows["600005.SH"] == (date(2024, 1, 2), False, APPROX)  # 来源未知的精确行被覆盖
+    assert rows["600000.SH"] == (None, None, APPROX)  # 来源未知的近似退市日：这次说在市，以这次为准
+    assert rows["000001.SZ"] == (None, None, APPROX)  # 同上
+
+
+def test_legacy_rows_without_source_exact_source(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧快照：精确源说在市时，没有质量行（exact 为 null）和来源未知的近似退市日都保留。"""
+    exact_dir, _ = two_sources(settings)
+    seed_legacy_snapshot(settings, monkeypatch)
+    store, task_id = sync_as(settings, EXACT, exact_dir, delist_now={"600001.SH": None})
+    rows = delist_rows(settings)
+    assert rows["600001.SH"] == (date(2009, 12, 25), None, None)  # exact 为 null：仍是“不知道”
+    assert rows["600000.SH"] == (date(2020, 5, 6), False, None)
+    assert rows["600005.SH"] == (date(2024, 1, 3), True, EXACT)
+    warning = [m.message for m in store.logs(task_id) if m.level == "warning"]
+    assert any("按已退市处理" in m and "全部交易日" in m for m in warning)
+
+
+def test_commit_in_between_is_not_overwritten(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """合并读快照之后、事务打开之前，别的同步提交了精确退市日：这次重试，不能用近似值盖掉它。"""
+    exact_dir, approx_dir = two_sources(settings)
+    sync_as(settings, EXACT, exact_dir, absent=["600005.SH"])
+    real = merge_delist_dates
+    hits: list[int] = []
+
+    def merge_then_other_commit(*args: Any, **kwargs: Any) -> Any:
+        merged = real(*args, **kwargs)
+        if not hits:
+            hits.append(1)
+            with DataStore(settings.data_dir).transaction(note="别的同步") as tx:
+                tx.write(
+                    "securities",
+                    sec_row("600005.SH", "武钢股份", date(1999, 8, 3), date(2024, 1, 3)),
+                )
+                tx.write(
+                    "delist_date_quality",
+                    pl.DataFrame(
+                        {"symbol": ["600005.SH"], "exact": [True], "source": [EXACT]},
+                        schema=datasets_module.DELIST_DATE_QUALITY_SCHEMA,
+                    ),
+                )
+        return merged
+
+    monkeypatch.setattr("duohelm.tasks.sync.merge_delist_dates", merge_then_other_commit)
+    behave(approx_dir, **approx(delist_now={"600005.SH": "2024-01-02"}))
+    store, task_id = run(settings, plugin_id=APPROX)
+    assert "合并退市日之后" in failed(store, task_id)
+    assert delist_rows(settings)["600005.SH"] == (date(2024, 1, 3), True, EXACT)
+    # 重试（这次合并读到的是新快照）：精确值仍在
+    sync_as(settings, APPROX, approx_dir, **approx(delist_now={"600005.SH": "2024-01-02"}))
+    assert delist_rows(settings)["600005.SH"] == (date(2024, 1, 3), True, EXACT)
+
+
+def test_approximate_in_market_replaces_other_approximate_source(settings: Settings) -> None:
+    """近似源说在市，已有的近似退市日来自别的近似源：同一等级，以这次为准。"""
+    _, approx_dir = two_sources(settings)
+    other = install(settings, plugin_id="fake-approx-2", exact_delist_date=False)
+    confirm(settings, plugin_id="fake-approx-2")
+    sync_as(settings, "fake-approx-2", other, **approx(delist_now={"600000.SH": "2020-05-06"}))
+    assert delist_rows(settings)["600000.SH"] == (date(2020, 5, 6), False, "fake-approx-2")
+    sync_as(settings, APPROX, approx_dir, exact_delist_date=False)
+    assert delist_rows(settings)["600000.SH"] == (None, None, APPROX)

@@ -188,7 +188,16 @@ class DataStore:
             path = self.files_dir / entry.path
             if verify and _sha256(path) != entry.sha256:
                 raise CorruptFileError(f"数据文件 {entry.path} 的内容与清单不符")
-            frames.append(pl.scan_parquet(path).with_columns(pl.lit(seq).alias(_SEQ)))
+            scan = pl.scan_parquet(path)
+            # 只有数据集声明为“后来新增的可空列”（如 observed_at）才补 null，不改写旧文件；
+            # 其他列（主键、_deleted 等）缺失照常报错
+            have = scan.collect_schema().names()
+            absent = [
+                pl.lit(None, dtype=ds.schema[c]).alias(c) for c in ds.added_columns if c not in have
+            ]
+            frames.append(
+                scan.with_columns(*absent).select(*ds.file_schema(), pl.lit(seq).alias(_SEQ))
+            )
         lf = pl.concat(frames, how="vertical")
         if symbols is not None and "symbol" in ds.schema:
             lf = lf.filter(pl.col("symbol").is_in(list(symbols)))

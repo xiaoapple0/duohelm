@@ -1028,7 +1028,38 @@ MEMBERS = {
 
 
 def snapshot_rows(settings: Settings, dataset: str) -> list[tuple[Any, ...]]:
-    return DataStore(settings.data_dir).read(dataset).rows()
+    """快照里的行，不含拍摄时间 observed_at（它另有测试）。"""
+    return DataStore(settings.data_dir).read(dataset).drop("observed_at").rows()
+
+
+def test_snapshot_rows_record_observed_at_in_shanghai(settings: Settings) -> None:
+    """每一行记下拍摄时间（北京时间），不依赖本机时区（#54）。"""
+    plugin = install(settings)
+    behave(plugin, names={"000001.SZ": "*ST平安"}, index_members=MEMBERS)
+    confirm(settings)
+    run_at(settings, beijing(5, 16, 40), indexes=INDEXES)
+    data = DataStore(settings.data_dir)
+    for dataset in ("st_daily", "index_members_daily"):
+        observed = data.read(dataset).get_column("observed_at")
+        assert observed.dtype == pl.Datetime("us", "Asia/Shanghai")
+        assert observed.dt.replace_time_zone(None).unique().to_list() == [
+            beijing(5, 16, 40).replace(tzinfo=None)
+        ]
+
+
+def test_snapshot_skipped_when_run_crosses_midnight(settings: Settings) -> None:
+    """读完数据时已过午夜：读到的可能是下一天的状态，不能记成快照日期，不写快照。"""
+    install(settings)
+    confirm(settings)
+    times = iter([beijing(5, 23, 59), beijing(6, 0, 3)])
+    store = TaskStore(settings.db_path)
+    types = TaskTypeRegistry([data_sync(settings, limits=FAST, now=lambda: next(times))])
+    body = {"plugin_id": "fake-src", "start": START.isoformat(), "indexes": INDEXES}
+    task = store.create("data.sync", types.validate_params("data.sync", body), max_attempts=1)
+    assert Worker(store, types).run_once()
+    result = result_of(store, task.id)
+    assert result.snapshot_skipped is not None and "不在快照日期" in result.snapshot_skipped
+    assert snapshot_rows(settings, "st_daily") == []
 
 
 def test_snapshots_written_at_close_in_same_transaction(settings: Settings) -> None:

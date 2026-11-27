@@ -23,6 +23,8 @@ class Dataset:
     keys: tuple[str, ...]
     partition_by_year: str | None = None
     """按这个日期列的年份分区；None 表示不分区。"""
+    added_columns: tuple[str, ...] = ()
+    """后来新增的可空列：旧文件没有这些列，读出来补为 null。其他列缺失照常报错。"""
 
     def __post_init__(self) -> None:
         # 分区由主键决定，同一主键的所有版本才会落在同一个分区里（整理时按分区合并）
@@ -50,11 +52,16 @@ DELIST_DATE_QUALITY_SCHEMA: dict[str, pl.DataType] = {"symbol": pl.String(), "ex
 快照里没有这个数据集的行时，是“不知道”，不是“精确”。
 """
 
+OBSERVED_AT = pl.Datetime("us", "Asia/Shanghai")
+"""快照的拍摄时间（#54）：按 Asia/Shanghai 记录的带时区时间戳，可为空，不是主键。快照只能
+用于拍摄时间之后的下一个交易日；没有这一列的旧文件，读出来为 null。"""
+
 ST_DAILY_SCHEMA: dict[str, pl.DataType] = {
     "date": pl.Date(),
     "symbol": pl.String(),
     "name": pl.String(),
     "status": pl.String(),
+    "observed_at": OBSERVED_AT,
 }
 """每日 ST 名单快照（平台的数据集）：date 那天的 ST 证券和 ST 状态未知的证券。
 
@@ -66,6 +73,7 @@ INDEX_MEMBERS_DAILY_SCHEMA: dict[str, pl.DataType] = {
     "date": pl.Date(),
     "index": pl.String(),
     "symbol": pl.String(),
+    "observed_at": OBSERVED_AT,
 }
 """每日指数成分快照（平台的数据集）。某个日期某个指数有行才表示这一天有这个指数的快照。"""
 
@@ -83,12 +91,19 @@ DATASETS: dict[str, Dataset] = {
         Dataset("calendar", CALENDAR_SCHEMA, ("market", "date")),
         Dataset("delist_date_quality", DELIST_DATE_QUALITY_SCHEMA, ("symbol",)),
         Dataset("quality_report", QUALITY_REPORT_SCHEMA, ("key",)),
-        Dataset("st_daily", ST_DAILY_SCHEMA, ("date", "symbol"), partition_by_year="date"),
+        Dataset(
+            "st_daily",
+            ST_DAILY_SCHEMA,
+            ("date", "symbol"),
+            partition_by_year="date",
+            added_columns=("observed_at",),
+        ),
         Dataset(
             "index_members_daily",
             INDEX_MEMBERS_DAILY_SCHEMA,
             ("date", "index", "symbol"),
             partition_by_year="date",
+            added_columns=("observed_at",),
         ),
     )
 }

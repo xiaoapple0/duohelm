@@ -2,6 +2,7 @@
 import { dataApi } from "../../api/data";
 import type { CoverageRow, Security, Snapshot } from "../../api/data";
 import { shanghaiToday } from "../kline/dates";
+import { TEXT } from "./text";
 
 const PAGE = 500; // 接口允许的最大页大小
 
@@ -16,13 +17,19 @@ export interface Row extends CoverageRow {
 
 export type Known<T> = { known: true; value: T } | { known: false; reason: string };
 
+export type SnapshotInfo =
+  | { kind: "ok"; value: Snapshot }
+  /** 快照列表读到了，但里面没有这个快照（可能已被清理） */
+  | { kind: "notInList" }
+  | { kind: "error"; message: string };
+
 export interface Loaded {
   snapshot: string;
   /** 接口报告的总数 */
   total: number;
   rows: Row[];
   /** 创建时间、是否当前快照：快照列表读不到、或不在列表里时未知 */
-  info: Known<Snapshot>;
+  info: SnapshotInfo;
   /** 证券信息读不到时，交易所和在市/退市未知 */
   securitiesProblem: string | undefined;
 }
@@ -49,12 +56,13 @@ function offsets(total: number): number[] {
 
 async function allSecurities(snapshot: string): Promise<Security[]> {
   const first = await dataApi.securities({ snapshot, limit: PAGE, offset: 0 });
-  const rest = await Promise.all(
-    offsets(first.total).map((offset) => dataApi.securities({ snapshot, limit: PAGE, offset })),
-  );
-  const items = [first, ...rest].flatMap((p) => p.items);
+  const items = [...first.items];
+  // 逐页串行读取，不并发
+  for (const offset of offsets(first.total)) {
+    items.push(...(await dataApi.securities({ snapshot, limit: PAGE, offset })).items);
+  }
   if (items.length !== first.total) {
-    throw new Error(`证券信息只取到 ${items.length} / ${first.total} 条`);
+    throw new Error(TEXT.errors.securitiesIncomplete(items.length, first.total));
   }
   return items;
 }
@@ -72,20 +80,20 @@ export function statusOf(delistDate: string | null, today: string): Status {
 export async function loadCoverage(): Promise<Loaded> {
   const first = await dataApi.coverage({ limit: PAGE, offset: 0 });
   const snapshot = first.snapshot;
-  const [rest, securities, snapshots] = await Promise.all([
-    Promise.all(
-      offsets(first.total).map((offset) => dataApi.coverage({ snapshot, limit: PAGE, offset })),
-    ),
+  // 后端每页都要全量扫描日线，所以逐页串行读取，不并发
+  const items = [...first.items];
+  for (const offset of offsets(first.total)) {
+    const page = await dataApi.coverage({ snapshot, limit: PAGE, offset });
+    // 每页都必须来自同一个快照
+    if (page.snapshot !== snapshot) {
+      throw new Error(TEXT.errors.snapshotChanged);
+    }
+    items.push(...page.items);
+  }
+  const [securities, snapshots] = await Promise.all([
     known(allSecurities(snapshot)),
     known(dataApi.snapshots()),
   ]);
-  const pages = [first, ...rest];
-  // 每页都必须来自同一个快照
-  const mixed = pages.find((p) => p.snapshot !== snapshot);
-  if (mixed) {
-    throw new Error("分页读取时快照发生了变化");
-  }
-  const items = pages.flatMap((p) => p.items);
 
   const today = shanghaiToday();
   const bySymbol = new Map<string, Security>();
@@ -111,12 +119,12 @@ export async function loadCoverage(): Promise<Loaded> {
     };
   });
 
-  let info: Known<Snapshot>;
+  let info: SnapshotInfo;
   if (!snapshots.known) {
-    info = { known: false, reason: snapshots.reason };
+    info = { kind: "error", message: snapshots.reason };
   } else {
     const hit = snapshots.value.snapshots.find((s) => s.id === snapshot);
-    info = hit ? { known: true, value: hit } : { known: false, reason: "notInList" };
+    info = hit ? { kind: "ok", value: hit } : { kind: "notInList" };
   }
 
   return {

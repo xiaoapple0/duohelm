@@ -67,12 +67,12 @@ function SnapshotInfo({ data }: { data: Loaded }) {
   const info = data.info;
   let created: string;
   let state: string;
-  if (info.known) {
+  if (info.kind === "ok") {
     created = formatShanghai(info.value.created_at);
     state = info.value.is_current ? TEXT.snapshot.current : TEXT.snapshot.notCurrent;
   } else {
     created = TEXT.snapshot.createdUnknown(
-      info.reason === "notInList" ? TEXT.snapshot.notInList : info.reason,
+      info.kind === "notInList" ? TEXT.snapshot.notInList : info.message,
     );
     state = TEXT.snapshot.stateUnknown;
   }

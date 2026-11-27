@@ -20,6 +20,10 @@ export const TEXT = {
   empty: {
     title: "快照读取成功，但里面没有任何证券",
   },
+  errors: {
+    securitiesIncomplete: (got: number, total: number) => `证券信息只取到 ${got} / ${total} 条`,
+    snapshotChanged: "分页读取时快照发生了变化",
+  },
   partial: {
     title: (got: number, total: number) => `只取到 ${got} / ${total} 条，汇总不完整`,
     description: "读取期间数据有变化，或接口返回的条数与总数不一致。汇总和表格只反映已取到的部分。",

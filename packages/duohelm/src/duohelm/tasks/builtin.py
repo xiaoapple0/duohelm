@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from duohelm.registry import PluginRegistry
 from duohelm.settings import Settings
+from duohelm.tasks.cross_check import data_cross_check
 from duohelm.tasks.sync import data_sync
 from duohelm.tasks.types import RetryableError, TaskContext, TaskParams, TaskType
 
@@ -72,7 +73,7 @@ DEMO_SLEEP = TaskType(
 
 
 def builtin_task_types(settings: Settings) -> list[TaskType]:
-    types = [plugins_scan(settings), data_sync(settings)]
+    types = [plugins_scan(settings), data_sync(settings), data_cross_check(settings)]
     if settings.dev:
         types.append(DEMO_SLEEP)
     return types

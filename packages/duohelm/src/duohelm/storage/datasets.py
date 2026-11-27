@@ -23,6 +23,8 @@ class Dataset:
     keys: tuple[str, ...]
     partition_by_year: str | None = None
     """按这个日期列的年份分区；None 表示不分区。"""
+    added_columns: tuple[str, ...] = ()
+    """后来新增的可空列：旧文件没有这些列，读出来补为 null。其他列缺失照常报错。"""
 
     def __post_init__(self) -> None:
         # 分区由主键决定，同一主键的所有版本才会落在同一个分区里（整理时按分区合并）
@@ -89,12 +91,19 @@ DATASETS: dict[str, Dataset] = {
         Dataset("calendar", CALENDAR_SCHEMA, ("market", "date")),
         Dataset("delist_date_quality", DELIST_DATE_QUALITY_SCHEMA, ("symbol",)),
         Dataset("quality_report", QUALITY_REPORT_SCHEMA, ("key",)),
-        Dataset("st_daily", ST_DAILY_SCHEMA, ("date", "symbol"), partition_by_year="date"),
+        Dataset(
+            "st_daily",
+            ST_DAILY_SCHEMA,
+            ("date", "symbol"),
+            partition_by_year="date",
+            added_columns=("observed_at",),
+        ),
         Dataset(
             "index_members_daily",
             INDEX_MEMBERS_DAILY_SCHEMA,
             ("date", "index", "symbol"),
             partition_by_year="date",
+            added_columns=("observed_at",),
         ),
     )
 }

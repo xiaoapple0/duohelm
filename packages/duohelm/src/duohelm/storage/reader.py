@@ -356,7 +356,10 @@ class MarketReader:
         taken = pl.coalesce(
             pl.col("observed_at").dt.convert_time_zone("Asia/Shanghai").dt.date(), pl.col("date")
         )
-        rows = rows.filter((taken >= prev) & (taken < day))
+        # 按快照日期整体判断：某个 date 只要有一行不满足，这个 date 整体不可用，
+        # 不能返回残缺的名单（少掉的 ST 会被当成非 ST，少掉的成分会被当成不在指数里）
+        ok = rows.group_by("date").agg(((taken >= prev) & (taken < day)).all().alias("ok"))
+        rows = rows.join(ok.filter(pl.col("ok")).select("date"), on="date", how="semi")
         latest = rows.get_column("date").max()
         if not isinstance(latest, date):
             what = f"{dataset}{'' if index is None else f' 的 {index}'}"

@@ -163,3 +163,47 @@ def test_rerun_keeps_first_observed_at_when_content_unchanged() -> None:
             "observed_at"
         )
     ) == [naive(later)]
+
+
+def test_partial_date_is_unusable_as_a_whole(store: DataStore) -> None:
+    """同一个快照日期里只要有一行不满足，整个日期不可用，不返回残缺的名单。"""
+    rows = pl.concat(
+        [
+            st_rows(date(2024, 1, 4), at(1, 4, 16), ["000001.SZ"]),
+            st_rows(date(2024, 1, 4), at(1, 5, 9), ["600000.SH"]),  # 5 日早上补拍的
+        ]
+    )
+    put(store, rows)
+    with pytest.raises(DataNotFoundError):
+        MarketReader(store).st_on(date(2024, 1, 5))
+    # 同样的行拍摄日期都在 4 日：整体可用，两行都在
+    put(store, st_rows(date(2024, 1, 4), at(1, 4, 17), ["600000.SH"]))
+    assert MarketReader(store).st_on(date(2024, 1, 5)).height == 2
+
+
+def test_partial_index_members_date_is_unusable(store: DataStore) -> None:
+    rows = pl.concat(
+        [
+            member_rows(date(2024, 1, 4), at(1, 4, 16), "000300.SH", ["600000.SH"]),
+            member_rows(date(2024, 1, 4), at(1, 5, 9), "000300.SH", ["000001.SZ"]),
+        ]
+    )
+    put(store, members=rows)
+    with pytest.raises(DataNotFoundError):
+        MarketReader(store).index_members_on("000300.SH", date(2024, 1, 5))
+
+
+@pytest.mark.parametrize("missing", ["status", "symbol", "date", "_deleted"])
+def test_missing_non_added_column_is_an_error(
+    store: DataStore, monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    """只有声明为“后来新增”的 observed_at 缺失时补 null；缺少别的列（主键、_deleted）报错，
+    不能把整个文件的行静默过滤掉。"""
+    full = datasets_module.get_dataset("st_daily")
+    put(store, st_rows(date(2024, 1, 4), at(1, 4, 16), ["000001.SZ"]))
+    entry = store.manifest(store.head()).datasets["st_daily"][0]
+    path = store.files_dir / entry.path
+    pl.read_parquet(path).drop(missing).write_parquet(path)  # 破坏文件：去掉一列
+    assert full.added_columns == ("observed_at",)
+    with pytest.raises(pl.exceptions.PolarsError):
+        store.read("st_daily")

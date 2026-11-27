@@ -105,6 +105,58 @@ export interface TaskQuery {
 export interface TaskCreate {
   type: string;
   params: JsonObject;
+  dedupe_key?: string;
+}
+
+/** GET/PATCH /api/schedules/data-sync 的响应，与 packages/duohelm/src/duohelm/api/schedules.py 的 ScheduleOut 一致。 */
+export interface DataSyncSchedule {
+  enabled: boolean;
+  plugin_id: string | null;
+  /** 每个交易日触发的时刻，HH:MM，北京时间 */
+  time: string;
+  timezone: string;
+  /** 上次处理的北京日期（触发、被去重跳过、判定为非交易日都会记下） */
+  last_trigger_date: string | null;
+  plugin_warning: string | null;
+  /** 已启用但当前快照没有日线或日历：不会自动触发，要先手动全量同步。null 表示未知，原因见 state_error */
+  needs_full_sync: boolean | null;
+  state_error: string | null;
+  /** 带 +08:00 偏移；未启用或未知时为 null。是预估 */
+  next_run_at: string | null;
+}
+
+export interface DataSyncSchedulePatch {
+  enabled?: boolean;
+  plugin_id?: string;
+  time?: string;
+}
+
+/** data.sync 的参数（SyncParams）。日期是 YYYY-MM-DD；end 省略表示最近一个已收盘的日子。 */
+export interface DataSyncParams {
+  plugin_id: string;
+  start: string;
+  end?: string;
+}
+
+/** data.sync 的结果（SyncResult）。字段以后端为准，页面对没有认识的字段原样显示。 */
+export interface DataSyncResult {
+  plugin_id: string;
+  start: string;
+  end: string;
+  snapshot_id: string | null;
+  connection: string | null;
+  securities: number;
+  symbols: number;
+  written: Record<string, number>;
+  dropped_zero_volume: number;
+  scanned?: number;
+  rescanned?: number;
+  rechecked?: number;
+  snapshot_date?: string | null;
+  snapshot_skipped?: string | null;
+  st_snapshot_failed?: string | null;
+  st_unknown_names?: number;
+  index_snapshot_failed?: Record<string, string>;
 }
 
 /** 请求失败。message 优先使用后端返回的 detail。 */
@@ -172,6 +224,14 @@ function putJson<T>(path: string, body: unknown): Promise<T> {
   });
 }
 
+function patchJson<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 function deleteJson<T>(path: string): Promise<T> {
   return request<T>(path, { method: "DELETE" });
 }
@@ -213,6 +273,9 @@ export const api = {
     getJson<TaskLog[]>(`/api/tasks/${id}/logs${query({ after_id: afterId })}`),
   createTask: (body: TaskCreate) => postJson<Task>("/api/tasks", body),
   cancelTask: (id: number) => postJson<Task>(`/api/tasks/${id}/cancel`),
+  dataSyncSchedule: () => getJson<DataSyncSchedule>("/api/schedules/data-sync"),
+  updateDataSyncSchedule: (body: DataSyncSchedulePatch) =>
+    patchJson<DataSyncSchedule>("/api/schedules/data-sync", body),
   retryTask: (id: number) => postJson<Task>(`/api/tasks/${id}/retry`),
 };
 

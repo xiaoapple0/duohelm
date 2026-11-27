@@ -91,6 +91,7 @@ function SnapshotInfo({ data }: { data: Loaded }) {
 
 function Content({ data }: { data: Loaded }) {
   const [search, setSearch] = useState("");
+  const [draft, setDraft] = useState("");
   const [exchange, setExchange] = useState<string>();
   const [kind, setKind] = useState<string>();
   const [status, setStatus] = useState<Status>();
@@ -253,8 +254,12 @@ function Content({ data }: { data: Loaded }) {
               allowClear
               placeholder={TEXT.filter.search}
               style={{ width: 200 }}
+              value={draft}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                if (e.target.value === "") setSearch("");
+              }}
               onSearch={setSearch}
-              onChange={(e) => e.target.value === "" && setSearch("")}
             />
             <Select
               allowClear
@@ -294,6 +299,7 @@ function Content({ data }: { data: Loaded }) {
               <Button
                 onClick={() => {
                   setSearch("");
+                  setDraft("");
                   setExchange(undefined);
                   setKind(undefined);
                   setStatus(undefined);

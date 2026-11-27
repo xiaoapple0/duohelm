@@ -39,7 +39,6 @@ export const TEXT = {
     stateUnknown: "是否为当前快照未知",
     createdUnknown: (reason: string) => `未知（${reason}）`,
     notInList: "快照列表里没有这个快照",
-    fetched: "已取到证券数",
   },
 
   summary: {

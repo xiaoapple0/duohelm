@@ -99,6 +99,10 @@ export async function loadCoverage(): Promise<Loaded> {
     if (!securities.known || sec === undefined) {
       return { ...r, exchange: null, status: "unknown", delist_date: null };
     }
+    if (sec.exchange === null) {
+      // 证券信息不完整：保守起见，交易所和状态都按未知
+      return { ...r, exchange: null, status: "unknown", delist_date: null };
+    }
     return {
       ...r,
       exchange: sec.exchange,

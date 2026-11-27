@@ -3,7 +3,7 @@
 export const TEXT = {
   title: "数据覆盖情况",
   reload: "重新读取",
-  loading: "正在读取全部证券的覆盖统计……",
+  loading: "正在读取覆盖汇总……",
   timeNote: "日期是北京时间的交易日；时间按 Asia/Shanghai 显示。",
   missingNote:
     "缺失天数 = 首末日期之间按交易日历应有、但库里没有日线的天数。同步时不保存停牌日，所以停牌日也算缺失，这里分不出“停牌”和“漏数据”；它是进一步检查的线索，不是数据错误的判定。没有日线的证券缺失天数未知。",
@@ -20,18 +20,10 @@ export const TEXT = {
   empty: {
     title: "快照读取成功，但里面没有任何证券",
   },
-  errors: {
-    securitiesIncomplete: (got: number, total: number) => `证券信息只取到 ${got} / ${total} 条`,
-    snapshotChanged: "分页读取时快照发生了变化",
-  },
-  partial: {
-    title: (got: number, total: number) => `只取到 ${got} / ${total} 条，汇总不完整`,
-    description: "读取期间数据有变化，或接口返回的条数与总数不一致。汇总和表格只反映已取到的部分。",
-  },
-  securitiesUnknown: {
-    title: "证券信息读取失败：交易所和在市/退市未知",
-    description: (message: string) =>
-      `${message}。其余统计仍然有效；交易所和在市/退市只能显示“未知”。`,
+  tableError: {
+    title: "未知：没有取到这一页的覆盖统计",
+    description: (message: string) => `${message}。这不表示没有数据，只是没读到。`,
+    retry: "重试",
   },
 
   snapshot: {
@@ -56,20 +48,14 @@ export const TEXT = {
     unknownLabel: "未知",
     statusActive: "在市",
     statusDelisted: "已退市",
-    statusNote:
-      "已退市 = 证券信息里有退市日且不晚于今天（北京日期）；没有退市日的算在市。部分数据源的退市日是近似值。",
+    statusNote: (asOf: string) =>
+      `已退市 = 证券信息里有退市日且不晚于 ${asOf}（接口按北京日期判定）；没有退市日的算在市。证券信息里没有的代码，交易所和在市/退市都是“未知”。部分数据源的退市日是近似值。`,
     total: "合计",
   },
 
   filter: {
-    search: "代码或名称包含",
-    exchange: "交易所",
     kind: "种类",
-    status: "在市/退市",
-    onlyMissing: "只看有缺失的",
-    onlyNoBars: "只看无日线的",
-    reset: "清除筛选",
-    shown: (n: number, total: number) => `显示 ${n} / ${total} 只`,
+    note: "表格按代码排序，按种类筛选（种类未知的证券不能筛选）；汇总始终是整个快照。",
   },
 
   col: {

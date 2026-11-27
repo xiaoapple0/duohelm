@@ -309,7 +309,7 @@ data/
 
 源码：`web/src/pages/kline/`，接口类型 `web/src/api/data.ts`（手写，与 `api/data.py` 的响应一致，M1 改为从 OpenAPI 生成后删除）。页面路径 `/kline`，只调上面的读取接口。
 
-- 选证券（按名称前缀或代码搜索）、起止日期、复权方式（`none` / `hfq` / `qfq`，`qfq` 用后端默认基准日，即区间最后一根）；画 K 线（红涨绿跌）和成交量，全部用 SVG，没有图表库依赖
+- 选证券（按名称前缀或代码搜索）、起止日期、复权方式（`none` / `hfq` / `qfq`，`qfq` 用后端默认基准日，即区间最后一根）；用 ECharts 画 K 线（candlestick，红涨绿跌）和下方的成交量柱（只引入 `echarts/core` 和用到的图表、组件，封装在 `KlineChart.tsx`：`useEffect` 里 `init` / `dispose`，`ResizeObserver` 触发 `resize`；项目目前没有暗色模式，不随主题切换）。横轴是类目轴，直接显示接口返回的 `YYYY-MM-DD` 字符串，不做时区换算；缺失值（null）用“不画”表示（蜡烛和成交量柱用 `-`），不补 0。前端依赖 `echarts`（维护者批准），不使用包装库
 - 日期按北京时间的交易日处理：默认区间的“今天”用 `Intl` 以 `Asia/Shanghai` 换算，日期始终是 `YYYY-MM-DD` 字符串，日期运算用 UTC 日历，不经过浏览器本机时区
 - **三种结果分开显示**：
   - 后端 404 或网络错误：写明“未知”（没取到数据，不等于没有数据），带后端的说明

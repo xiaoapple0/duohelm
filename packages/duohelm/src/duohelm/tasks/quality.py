@@ -49,6 +49,7 @@ class QualityCollector:
         ex_events: pl.DataFrame | None = None,
         ex_events_missing_reason: str = "数据源没有提供除权除息记录",
         delist_quality: pl.DataFrame | None = None,
+        delist_conflicts: pl.DataFrame | None = None,
     ) -> None:
         self._calendar = calendar.select("date").unique()
         self._securities = securities.select("symbol", "list_date", "delist_date")
@@ -63,6 +64,8 @@ class QualityCollector:
             .filter(pl.col("delist_date").is_not_null() & pl.col("exact").ne_missing(True))
             .select("symbol", pl.col("exact").alias("delist_date_exact"))
         )
+        # 精确源说在市、覆盖了别人的退市日：symbol、other_source、other_delist_date
+        self._conflicts = delist_conflicts.sort("symbol") if delist_conflicts is not None else None
         self._start = start
         self._end = end
         self._events = ex_events
@@ -221,6 +224,26 @@ class QualityCollector:
 
     # ---- 报告 ----
 
+    def _conflict_check(self, plugin_id: str) -> dict[str, Any]:
+        """退市日冲突：这次的数据源（精确）说在市，别的数据源（或来源未知）给过退市日，
+        以这次为准、按在市处理。如果这次的数据源漏报了退市，会有幸存者偏差：逐只列出
+        两边的数据源和日期，方便核对。"""
+        rows = self._conflicts.to_dicts() if self._conflicts is not None else []
+        return {
+            "status": "issues" if rows else "ok",
+            "count": len(rows),
+            "examples": [
+                {
+                    "symbol": r["symbol"],
+                    "exact_source": plugin_id,
+                    "exact_delist_date": None,  # 在市
+                    "other_source": r["other_source"],
+                    "other_delist_date": _iso(r["other_delist_date"]),
+                }
+                for r in rows[:MAX_EXAMPLES]
+            ],
+        }
+
     def finish(self, plugin_id: str) -> dict[str, Any]:
         """生成报告（可以直接 json 序列化，不含时间戳）。"""
         ohlc_status: Status = "issues" if self._ohlc_rows else "ok"
@@ -267,6 +290,7 @@ class QualityCollector:
                     "examples": self._cal_examples,
                 },
                 "adj_factor_jumps": adj,
+                "delist_date_conflicts": self._conflict_check(plugin_id),
                 "missing_days": {
                     "status": "issues" if missing_total else "ok",
                     # 数据源没有提供停牌日列表：没有 K 线又没有占位行的日子，可能是停牌，

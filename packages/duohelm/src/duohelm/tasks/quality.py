@@ -236,6 +236,7 @@ class QualityCollector:
                 {
                     "symbol": r["symbol"],
                     "exact_source": r["exact_source"],
+                    "exact_confirmed": r["exact_confirmed"],
                     "exact_delist_date": _iso(r["exact_delist_date"]),  # 在市为 None
                     "other_source": r["other_source"],
                     "other_delist_date": _iso(r["other_delist_date"]),

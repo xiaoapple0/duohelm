@@ -540,9 +540,12 @@ def _merge_delist_dates(
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, str | None]:
     """和当前快照里已有的证券合并退市日（精确的优先，见 delist_merge）。
 
-    返回 (证券, 质量, 精确源说在市而覆盖了别人的退市日的证券, 读取的快照 id)。质量每只证券一行：
-    有退市日的按数据源的声明记精确或近似，仍在市的为 null。读的是固定的快照（不是“当前
-    快照”）：写入时事务的基础快照必须还是它，见 :func:`_write_securities`。
+    返回 (证券, 质量, 退市日冲突, 读取的快照 id)。质量每只证券一行：有退市日的按数据源的声明
+    记精确或近似；在市的，精确数据源写的记 True（确认在市），近似数据源写的为 null。冲突交给
+    质量报告（两个方向：精确数据源说在市而覆盖了别人的退市日；近似数据源说已退市而没能覆盖
+    精确数据源确认的在市，或覆盖了精确性未确认的在市行，见 delist_merge.DelistMerge.reports）。
+    读的是固定的快照（不是“当前快照”）：写入时事务的基础快照必须还是它，见
+    :func:`_write_securities`。
     """
     if not caps.exact_delist_date:
         ctx.log(f"插件 {source} 的退市日是近似值，记进 delist_date_quality")
@@ -558,27 +561,51 @@ def _merge_delist_dates(
     merged = merge_delist_dates(
         securities, existing, existing_quality, exact=caps.exact_delist_date, source=source
     )
-    if merged.kept_exact:
+    if merged.kept_delisted:
         ctx.log(
-            f"{len(merged.kept_exact)} 只证券已有别的数据源给的精确退市日，保留它而不用"
-            f"这次的值，例如 {examples(merged.kept_exact)}"
+            f"{len(merged.kept_delisted)} 只证券已有别的数据源给的精确退市日，保留它而不用"
+            f"这次的值，例如 {examples(merged.kept_delisted)}"
         )
-    overridden = merged.reports
-    if overridden.height:
-        ctx.log(
-            f"{overridden.height} 只证券的精确数据源说在市、另一个数据源（或来源未知）说已退市："
-            "以精确数据源为准，按在市处理。如果精确数据源漏报了退市，会有幸存者偏差，"
-            "两边的数据源和日期见质量报告的 delist_date_conflicts，请核对，例如 "
-            f"{examples(overridden.get_column('symbol').to_list())}",
-            "warning",
-        )
+    reports = merged.reports
+    for kind, message in _REPORT_MESSAGES.items():
+        symbols = reports.filter(pl.col("kind") == kind).get_column("symbol").to_list()
+        if symbols:
+            ctx.log(
+                f"{len(symbols)} 只证券{message}两边的数据源和日期见质量报告的 "
+                f"delist_date_conflicts，请核对，例如 {examples(symbols)}",
+                "warning",
+            )
     if merged.conflicts:
         ctx.log(
             f"{len(merged.conflicts)} 只证券两个数据源给的精确退市日不同，以这次的为准，"
             f"例如 {examples(merged.conflicts)}",
             "warning",
         )
-    return merged.securities, merged.quality, overridden, head
+    if merged.delisted_over_in_market:
+        ctx.log(
+            f"{len(merged.delisted_over_in_market)} 只证券这次的精确数据源给出退市日，已有的是"
+            "另一个精确数据源确认在市：精确退市日不同，以这次的为准，例如 "
+            f"{examples(merged.delisted_over_in_market)}",
+            "warning",
+        )
+    return merged.securities, merged.quality, reports, head
+
+
+_REPORT_MESSAGES = {
+    "in_market_over_delisted": (
+        "的精确数据源说在市、另一个数据源（或来源未知）说已退市：以精确数据源为准，按在市处理。"
+        "如果精确数据源漏报了退市，会有幸存者偏差，"
+    ),
+    "delisted_vs_confirmed": (
+        "已有精确数据源确认在市，这次的近似数据源说已退市：保留在市，不用这次的退市日。"
+        "如果精确数据源漏报了退市，会有幸存者偏差，"
+    ),
+    "delisted_vs_unconfirmed": (
+        "已有别的数据源写的在市行，这次的近似数据源说已退市：那一行的 exact 为 null，不知道"
+        "它是不是精确数据源写的（本改动之前精确数据源的在市行也是 null），按这次的退市日处理。"
+        "如果那个数据源是精确的，这是它的在市被覆盖，"
+    ),
+}
 
 
 def _write_securities(

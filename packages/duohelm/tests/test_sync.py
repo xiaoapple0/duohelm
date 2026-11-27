@@ -1493,7 +1493,7 @@ def sync_as(
 
 
 def conflicts_of(settings: Settings) -> dict[str, dict[str, Any]]:
-    """质量报告里的退市日冲突（精确源说在市而覆盖了别人的退市日），按代码索引。"""
+    """最近一份质量报告里的退市日冲突（两个方向，见 delist_date_conflicts），按代码索引。"""
     report = json.loads(DataStore(settings.data_dir).read("quality_report")["report"][0])
     check = report["checks"]["delist_date_conflicts"]
     assert check["count"] == len(check["examples"]) and check["status"] == (
@@ -1528,7 +1528,7 @@ def test_approximate_source_does_not_overwrite_exact_delist_date(settings: Setti
     assert rows["600001.SH"] == (date(2009, 12, 25), True, EXACT)
     store, task_id = sync_as(settings, APPROX, approx_dir, **approx(delist_now={"600005.SH": None}))
     assert delist_rows(settings)["600005.SH"] == (date(2024, 1, 3), True, EXACT)
-    assert any("精确退市日" in log.message for log in store.logs(task_id))
+    assert any("已有别的数据源给的精确退市日，保留它" in m.message for m in store.logs(task_id))
 
 
 def test_exact_source_overwrites_earlier_approximate_value(settings: Settings) -> None:
@@ -1572,6 +1572,7 @@ def test_exact_in_market_overrides_approximate_delisted_and_reports_conflict(
         "600000.SH": {
             "symbol": "600000.SH",
             "exact_source": EXACT,
+            "exact_confirmed": True,
             "exact_delist_date": None,
             "other_source": APPROX,
             "other_delist_date": "2020-05-06",
@@ -1600,6 +1601,7 @@ def test_exact_in_market_then_approximate_delisted_keeps_in_market_and_reports_c
         "600000.SH": {
             "symbol": "600000.SH",
             "exact_source": EXACT,
+            "exact_confirmed": True,
             "exact_delist_date": None,
             "other_source": APPROX,
             "other_delist_date": "2020-05-06",
@@ -1613,6 +1615,130 @@ def test_exact_in_market_then_approximate_delisted_keeps_in_market_and_reports_c
     sync_as(settings, APPROX, approx_dir, **approx(delist_now={"600000.SH": None}))
     assert delist_rows(settings)["600000.SH"] == (None, True, EXACT)
     assert conflicts_of(settings) == {}
+
+
+def warnings_of(store: TaskStore, task_id: int) -> list[str]:
+    return [m.message for m in store.logs(task_id) if m.level == "warning"]
+
+
+def test_confirmed_in_market_protects_only_delist_columns_other_columns_follow_this_sync(
+    settings: Settings,
+) -> None:
+    """先精确（在市，名称不带 ST）后近似（名称带 ST）：在市行的保护只管 delist_date、exact、
+    source；名称用这次的值，ST 快照按这次的名称算，不停在上一次的名称上。"""
+    _, approx_dir = two_sources(settings)
+    run_at(settings, CLOSE_DAY, plugin_id=EXACT)
+    assert snapshot_rows(settings, "st_daily") == []
+    behave(
+        approx_dir,
+        **approx(
+            names={"000001.SZ": "*ST平安", "600000.SH": "ST浦发"},
+            delist_now={"600000.SH": "2020-05-06"},  # 近似源说已退市：不覆盖精确源确认的在市
+        ),
+    )
+    store, task_id = run_at(settings, CLOSE_DAY, plugin_id=APPROX)
+    result_of(store, task_id)
+    names = dict(DataStore(settings.data_dir).read("securities").select("symbol", "name").rows())
+    assert names["000001.SZ"] == "*ST平安" and names["600000.SH"] == "ST浦发"
+    rows = delist_rows(settings)
+    assert rows["000001.SZ"] == (None, True, EXACT)
+    assert rows["600000.SH"] == (None, True, EXACT)
+    assert snapshot_rows(settings, "st_daily") == [
+        (date(2024, 1, 5), "000001.SZ", "*ST平安", "st"),
+        (date(2024, 1, 5), "600000.SH", "ST浦发", "st"),
+    ]
+    assert set(conflicts_of(settings)) == {"600000.SH"}
+
+
+def test_kept_delisted_and_confirmed_in_market_are_logged_separately(settings: Settings) -> None:
+    """保留别人的精确退市日（整行）和保护精确数据源确认的在市，是两件事，日志分开写。"""
+    exact_dir, approx_dir = two_sources(settings)
+    sync_as(settings, EXACT, exact_dir)
+    store, task_id = sync_as(
+        settings, APPROX, approx_dir, **approx(delist_now={"600000.SH": "2020-05-06"})
+    )
+    messages = [m.message for m in store.logs(task_id)]
+    assert any(
+        "已有别的数据源给的精确退市日，保留它" in m and "600005.SH" in m and "600000.SH" not in m
+        for m in messages
+    )
+    assert any("确认在市" in m and "600000.SH" in m for m in warnings_of(store, task_id))
+    assert not any("确认在市" in m and "600005.SH" in m for m in messages)
+
+
+def downgrade_in_market_rows_to_old_format(settings: Settings) -> None:
+    """本改动之前精确源写的在市行：exact 为 null、source 是精确源。"""
+    data = DataStore(settings.data_dir)
+    in_market = data.read("securities").filter(pl.col("delist_date").is_null())["symbol"]
+    quality = data.read("delist_date_quality").with_columns(
+        pl.when(pl.col("symbol").is_in(in_market.implode()))
+        .then(None)
+        .otherwise(pl.col("exact"))
+        .alias("exact")
+    )
+    with data.transaction(note="old-format") as tx:
+        tx.write("delist_date_quality", quality)
+    assert quality_of(DataStore(settings.data_dir))["600000.SH"] is None
+
+
+def test_old_format_in_market_row_is_reported_unconfirmed_then_resynced(
+    settings: Settings,
+) -> None:
+    """过渡期：精确源写的旧格式在市行（exact 为 null）不能当作精确确认（查不到另一个插件的
+    声明）。近似源说已退市时按这次处理，但记“精确性未确认”的冲突和警告；精确源再同步一次
+    就升级为 exact=True，之后受保护。"""
+    exact_dir, approx_dir = two_sources(settings)
+    sync_as(settings, EXACT, exact_dir)
+    downgrade_in_market_rows_to_old_format(settings)
+    store, task_id = sync_as(
+        settings, APPROX, approx_dir, **approx(delist_now={"600000.SH": "2020-05-06"})
+    )
+    assert delist_rows(settings)["600000.SH"] == (date(2020, 5, 6), False, APPROX)
+    assert conflicts_of(settings) == {
+        "600000.SH": {
+            "symbol": "600000.SH",
+            "exact_source": EXACT,
+            "exact_confirmed": False,
+            "exact_delist_date": None,
+            "other_source": APPROX,
+            "other_delist_date": "2020-05-06",
+        }
+    }
+    assert any("不知道" in m and "600000.SH" in m for m in warnings_of(store, task_id))
+    # 精确源再同步：在市，exact=True，冲突记在这次的报告里
+    sync_as(settings, EXACT, exact_dir)
+    assert delist_rows(settings)["600000.SH"] == (None, True, EXACT)
+    assert conflicts_of(settings)["600000.SH"]["exact_confirmed"] is True
+    # 升级之后，近似源再说已退市就被保护
+    sync_as(settings, APPROX, approx_dir, **approx(delist_now={"600000.SH": "2020-05-06"}))
+    assert delist_rows(settings)["600000.SH"] == (None, True, EXACT)
+
+
+def test_exact_in_market_does_not_override_other_exact_delisted_row(settings: Settings) -> None:
+    """另一个精确源给出退市日，这个精确源说在市：保留退市（整行）。"""
+    exact_dir, _ = two_sources(settings)
+    other = install(settings, plugin_id="fake-exact-2")
+    confirm(settings, plugin_id="fake-exact-2")
+    sync_as(settings, "fake-exact-2", other)  # 600005.SH 退市日 2024-01-03
+    store, task_id = sync_as(settings, EXACT, exact_dir, delist_now={"600005.SH": None})
+    assert delist_rows(settings)["600005.SH"] == (date(2024, 1, 3), True, "fake-exact-2")
+    assert any("已有别的数据源给的精确退市日，保留它" in m.message for m in store.logs(task_id))
+
+
+def test_exact_delisted_over_other_exact_confirmed_in_market_warns(settings: Settings) -> None:
+    """精确源给出退市日，已有的是另一个精确源确认的在市：以这次为准，日志记“精确退市日不同”。"""
+    exact_dir, _ = two_sources(settings)
+    other = install(settings, plugin_id="fake-exact-2")
+    confirm(settings, plugin_id="fake-exact-2")
+    sync_as(settings, EXACT, exact_dir)  # 600000.SH 在市
+    store, task_id = sync_as(
+        settings, "fake-exact-2", other, delist_now={"600000.SH": "2023-12-28"}
+    )
+    assert delist_rows(settings)["600000.SH"] == (date(2023, 12, 28), True, "fake-exact-2")
+    assert any(
+        "精确退市日不同" in m and "确认在市" in m and "600000.SH" in m
+        for m in warnings_of(store, task_id)
+    )
 
 
 def test_exact_sources_with_different_dates_latest_sync_wins_with_warning(
@@ -1777,6 +1903,7 @@ def test_exact_in_market_overrides_unknown_source_exact_row_and_reports_conflict
     assert conflicts_of(settings)["600005.SH"] == {
         "symbol": "600005.SH",
         "exact_source": EXACT,
+        "exact_confirmed": True,
         "exact_delist_date": None,
         "other_source": "来源未知",
         "other_delist_date": "2024-01-03",

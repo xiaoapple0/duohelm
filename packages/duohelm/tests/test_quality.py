@@ -288,6 +288,7 @@ def test_delist_date_conflicts_list_both_sources_and_dates() -> None:
             "symbol": ["600000.SH", "600005.SH"],
             "exact_source": ["xtdata", "xtdata"],
             "exact_delist_date": pl.Series([None, None], dtype=pl.Date()),
+            "exact_confirmed": [True, False],
             "other_source": ["eltdx", "来源未知"],
             "other_delist_date": [date(2020, 5, 6), date(2024, 1, 3)],
         }
@@ -298,8 +299,10 @@ def test_delist_date_conflicts_list_both_sources_and_dates() -> None:
     assert check["examples"][0] == {
         "symbol": "600000.SH",
         "exact_source": "xtdata",
+        "exact_confirmed": True,
         "exact_delist_date": None,
         "other_source": "eltdx",
         "other_delist_date": "2020-05-06",
     }
     assert check["examples"][1]["other_source"] == "来源未知"
+    assert check["examples"][1]["exact_confirmed"] is False

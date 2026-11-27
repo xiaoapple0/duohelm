@@ -9,7 +9,8 @@
   说明有一边的单位不是股，单独报告为 ``volume_unit_mismatch``，不当成逐日的成交量差异
 - 读取失败是“未知”，不是“没有差异”：某个数据源整体不可用，或某一批证券读取、校验失败，
   相关证券记进 ``unknown_symbols``，``complete`` 为 False
-- 和 ``data.sync`` 一致：成交量为 0 的行（停牌占位）不参与比较；成交量为空的字段不比较，只计数
+- 成交量为 0 的行（停牌占位）不参与比较，同 ``data.sync`` 入库时丢弃它们；成交量等字段为空（或 NaN）
+  时 ``data.sync`` 直接判为不合格；这里空字段不比较、只计数，并让结果不完整（``partial``）
 """
 
 from __future__ import annotations
@@ -150,8 +151,9 @@ class CrossCheckResult(BaseModel):
     start: date
     end: date
     status: Literal["compared", "partial", "unknown"]
-    """compared：所有证券两边都读到并比较了；partial：有证券的数据读取失败（未知），其余比较了；
-    unknown：一个证券也没比较成。无论哪种，只要有差异，都在 ``counts`` 里。"""
+    """compared：所有证券两边都读到并比较了，且没有空字段；partial：有证券的数据读取失败（未知），
+    或有字段为空没有比较（``unknown_fields`` 不为空），其余比较了；unknown：一个证券也没比较成。
+    无论哪种，只要有差异，都在 ``counts`` 里。"""
     complete: bool
     """status 为 compared。False 时不能当成“没有差异”。"""
     sources: dict[str, SourceStatus]
@@ -180,7 +182,8 @@ class CrossCheckResult(BaseModel):
     top_symbols: dict[str, int] = Field(default_factory=lambda: {})
     """差异最多的证券（最多 ``max_examples`` 个）及差异条数。"""
     examples: list[Difference] = Field(default_factory=lambda: [])
-    """差异样例：每个 kind 最多 ``max_examples`` 条，按证券、日期排序。"""
+    """差异样例：名额按 kind 分配，``bar_mismatch`` 再按字段分配，每个名额最多 ``max_examples`` 条
+    （保留最先遇到的）；输出统一按 kind、证券、日期、字段排序。"""
     examples_truncated: bool = False
 
 
@@ -250,6 +253,7 @@ class _Source:
     caps: Capabilities | None = None
     error: str | None = None
     batch_errors: int = 0
+    last_batch_error: str | None = None
 
     @property
     def usable(self) -> bool:
@@ -268,7 +272,7 @@ class _Checker:
         self.counts: Counter[str] = Counter()
         self.per_symbol: Counter[str] = Counter()
         self.examples: dict[str, list[Difference]] = {}
-        self.unknown: dict[str, tuple[set[str], str]] = {}
+        self.unknown: dict[str, dict[str, str]] = {}
         self.unknown_fields: Counter[str] = Counter()
         self.bars_compared = 0
         self.bars_consistent = 0
@@ -285,6 +289,7 @@ class _Checker:
             self.ctx.log(exc.traceback, "error")
         if batch:
             source.batch_errors += 1
+            source.last_batch_error = message
         else:
             source.error = message
         self.ctx.log(
@@ -294,9 +299,7 @@ class _Checker:
 
     def _mark_unknown(self, symbols: Sequence[str], label: str, reason: str) -> None:
         for s in symbols:
-            labels, old = self.unknown.get(s, (set(), reason))
-            labels.add(label)
-            self.unknown[s] = (labels, old)
+            self.unknown.setdefault(s, {})[label] = reason
 
     # ---- 主流程
 
@@ -386,8 +389,8 @@ class _Checker:
         for label, value in got.items():
             if value is None:
                 source = self.sources[label]
-                reason = source.error or "这一批的读取或校验失败"
-                self._mark_unknown(batch, label, f"数据源 {label}：{reason}")
+                reason = source.error or source.last_batch_error or "这一批的读取或校验失败"
+                self._mark_unknown(batch, label, reason)
         if a is None or b is None:
             return
         self.compared += len(batch)
@@ -574,6 +577,8 @@ class _Checker:
             status = "partial"
         else:
             status = "compared"
+            if any(self.unknown_fields.values()):
+                status = "partial"  # 有字段为空没有比较：不能说两边一致
         if p.symbols is None and not symbols:
             status = "unknown"  # 没有确定要核对哪些证券
         examples = sorted(
@@ -607,8 +612,12 @@ class _Checker:
             symbols_compared=self.compared,
             unknown_symbols_total=len(unknown),
             unknown_symbols=[
-                UnknownSymbols(symbol=s, unknown_in=sorted(labels), reason=reason)
-                for s, (labels, reason) in unknown[: p.max_examples]
+                UnknownSymbols(
+                    symbol=s,
+                    unknown_in=sorted(reasons),
+                    reason="；".join(f"数据源 {k}：{v}" for k, v in sorted(reasons.items())),
+                )
+                for s, reasons in unknown[: p.max_examples]
             ],
             only_listed_in_a=list(only_a[: p.max_examples]),
             only_listed_in_b=list(only_b[: p.max_examples]),

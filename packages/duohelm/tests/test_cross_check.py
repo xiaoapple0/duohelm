@@ -404,7 +404,7 @@ def test_empty_field_is_unknown_not_consistent(settings: Settings, empty: float 
     a, b = base_data(), base_data()
     set_close(b, "600000.SH", "2024-01-05", empty)
     result = check(settings, a, b)
-    assert result.status == "compared"
+    assert result.status == "partial" and not result.complete  # 有字段没比较，不能说一致
     assert result.unknown_fields == {"close": 1}
     assert result.counts == {}
     assert result.bars_compared == 3 * len(DAYS)
@@ -472,3 +472,15 @@ def test_empty_intersection_is_unknown(settings: Settings) -> None:
     assert result.sources["a"].ok and result.sources["b"].ok
     assert result.status == "unknown" and not result.complete
     assert result.symbols_requested == 0 and result.only_listed_in_a_total == 1
+
+
+def test_both_sources_failing_keeps_both_reasons(settings: Settings) -> None:
+    a, b = base_data(), base_data()
+    a["bars_raise"] = ["600000.SH"]
+    b["bars_extra"] = True
+    result = check(settings, a, b)
+    assert result.status == "unknown"
+    for u in result.unknown_symbols:
+        assert u.unknown_in == ["a", "b"]
+        assert "数据源 a：" in u.reason and "bars 出错" in u.reason
+        assert "数据源 b：" in u.reason and "没有请求的证券" in u.reason

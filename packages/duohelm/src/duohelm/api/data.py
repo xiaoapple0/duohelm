@@ -1,10 +1,12 @@
-"""行情读取的 HTTP 接口：/api/data。只读，是 duohelm.storage.reader.MarketReader 的薄封装。
+"""行情数据的 HTTP 接口：/api/data。只读。行情读取是 duohelm.storage.reader.MarketReader 的薄封装。
 
-设计见 docs/subsystems/data.md 的“读取接口”一节。数据不存在返回 404，参数不合法返回 422。
+设计见 docs/subsystems/data.md 的“读取接口”和“入库质量报告”两节。
+数据不存在返回 404，参数不合法返回 422。
 """
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 from collections.abc import Generator
@@ -17,13 +19,19 @@ import polars as pl
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from duohelm.storage import DataStore, SnapshotInfo
+from duohelm.storage import (
+    CorruptFileError,
+    DataStore,
+    SnapshotInfo,
+    SnapshotNotFoundError,
+)
 from duohelm.storage.reader import (
     AdjustMode,
     DataNotFoundError,
     InvalidQueryError,
     MarketReader,
 )
+from duohelm.tasks.quality import REPORT_KEY
 
 _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _SNAPSHOT_PATTERN = r"^[0-9a-f]{64}$"
@@ -116,6 +124,21 @@ class CoverageOut(BaseModel):
     items: list[CoverageRowOut]
 
 
+def read_quality_report(data: DataStore, snapshot_id: str) -> dict[str, Any] | None:
+    """某个快照的质量报告；快照里没有报告（早于 #31 的快照）时为 None。
+
+    抛 :class:`SnapshotNotFoundError`：快照不存在。
+    """
+    rows = data.read("quality_report", snapshot=snapshot_id)
+    rows = rows.filter(pl.col("key") == REPORT_KEY)
+    if not rows.height:
+        return None
+    report = json.loads(rows.item(0, "report"))
+    if not isinstance(report, dict):
+        raise CorruptFileError("质量报告不是 JSON 对象")
+    return report  # pyright: ignore[reportUnknownVariableType]
+
+
 def _rows(df: pl.DataFrame) -> list[dict[str, Any]]:
     return df.to_dicts()
 
@@ -166,6 +189,21 @@ def data_router(data_dir: Path) -> APIRouter:
         with _mapped():
             info = reader().current_snapshot()
         return SnapshotOut.from_info(info, info.id)
+
+    @router.get("/snapshots/{snapshot_id}/quality-report")
+    def quality_report(snapshot_id: str) -> dict[str, Any]:
+        # 先校验格式：id 会用来拼清单文件的路径
+        if not re.fullmatch(r"[0-9a-f]{64}", snapshot_id):
+            raise HTTPException(404, f"找不到快照 {snapshot_id}")
+        try:
+            report = read_quality_report(DataStore(data_dir), snapshot_id)  # 按请求构造
+        except SnapshotNotFoundError:
+            raise HTTPException(404, f"找不到快照 {snapshot_id}") from None
+        if report is None:
+            raise HTTPException(
+                404, f"快照 {snapshot_id} 没有质量报告（它早于质量报告功能，重新同步后才有）"
+            )
+        return report
 
     @router.get("/securities", response_model=SecuritiesOut)
     def securities(

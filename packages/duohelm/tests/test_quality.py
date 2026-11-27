@@ -159,6 +159,32 @@ def test_missing_days_respect_listing_and_placeholders() -> None:
     assert missing["symbols_with_missing"] == 2
 
 
+def test_unknown_exactness_is_flagged_like_approximate() -> None:
+    """有退市日、但 exact 为 null 或没有记录：不知道精不精确，也要标注，不能漏掉。"""
+    null_exact = pl.DataFrame(
+        {"symbol": ["600005.SH"], "exact": [None]},
+        schema={"symbol": pl.String(), "exact": pl.Boolean()},
+    )
+    no_record = pl.DataFrame(schema={"symbol": pl.String(), "exact": pl.Boolean()})
+    for quality in (null_exact, no_record, None):
+        c = collector(delist_quality=quality)
+        c.add_batch(
+            ["600005.SH"], bars(row(D[0], "600005.SH", 10, 11, 9, 10)), EMPTY_BARS, NO_FACTORS
+        )
+        missing = c.finish("p")["checks"]["missing_days"]
+        assert missing["symbols_with_approximate_delist_date"] == 1
+        assert missing["per_symbol"][0]["delist_date_approximate"] is True
+
+
+def test_report_range_is_first_and_last_trading_day() -> None:
+    """报告的 start、end 是日历里实际覆盖到的第一个和最后一个交易日，不是请求的自然日。"""
+    c = QualityCollector(CALENDAR, SECURITIES, date(2024, 1, 1), date(2024, 1, 7))
+    report = c.finish("p")
+    assert (report["start"], report["end"]) == ("2024-01-02", "2024-01-05")
+    empty = QualityCollector(CALENDAR.clear(), SECURITIES, D[0], D[-1]).finish("p")
+    assert empty["start"] is None and empty["end"] is None
+
+
 def test_approximate_delist_date_is_flagged() -> None:
     """退市日不精确的证券：缺失天数可能少算，在报告里标注；精确的不标。"""
     quality = pl.DataFrame(

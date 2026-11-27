@@ -1244,6 +1244,22 @@ def test_bad_data_is_reported_but_not_blocked(settings: Settings) -> None:
     assert checks["missing_days"]["placeholder_total"] == 1
 
 
+def test_holiday_end_with_same_data_writes_no_new_snapshot(settings: Settings) -> None:
+    """两次同步只是 end 落在不同的非交易日、数据相同：报告的区间取实际覆盖的交易日，
+    报告不变，第二次不产生新快照。"""
+    install(settings)
+    confirm(settings)
+    store, first = run(settings)
+    result_of(store, first)
+    for end in ("2024-01-06", "2024-01-07"):  # 周六、周日
+        store, task_id = run(settings, end=end)
+        result = result_of(store, task_id)
+        assert result.snapshot_id is None, end
+        assert result.written["quality_report"] == 0
+    report = quality_report(settings, DataStore(settings.data_dir).head())
+    assert (report["start"], report["end"]) == ("2024-01-02", "2024-01-05")
+
+
 def test_rerun_with_same_report_writes_no_snapshot(settings: Settings) -> None:
     """报告不含时间戳：同样的数据，同样的报告，不会因为报告产生新快照。"""
     install(settings, bad_ohlc=True)

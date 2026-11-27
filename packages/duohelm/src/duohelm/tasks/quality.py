@@ -60,7 +60,7 @@ class QualityCollector:
         )
         self._inexact = (
             self._securities.join(quality, on="symbol", how="left")
-            .filter(pl.col("delist_date").is_not_null() & (pl.col("exact") != True))  # noqa: E712
+            .filter(pl.col("delist_date").is_not_null() & pl.col("exact").ne_missing(True))
             .select("symbol", pl.col("exact").alias("delist_date_exact"))
         )
         self._start = start
@@ -244,8 +244,10 @@ class QualityCollector:
         return {
             "version": REPORT_VERSION,
             "plugin_id": plugin_id,
-            "start": self._start.isoformat(),
-            "end": self._end.isoformat(),
+            # 实际覆盖到的第一个和最后一个交易日，不是请求的自然日：节假日触发、数据没变时
+            # 报告不变，不产生新快照
+            "start": _iso(self._calendar.get_column("date").min()),
+            "end": _iso(self._calendar.get_column("date").max()),
             "symbols": self._symbols,
             "bars_rows": self._bars_rows,
             "trading_days": self._calendar.height,
@@ -303,6 +305,10 @@ def encode_report(report: dict[str, Any]) -> str:
 def report_frame(report: dict[str, Any]) -> pl.DataFrame:
     """``quality_report`` 数据集的行。"""
     return pl.DataFrame({"key": [REPORT_KEY], "report": [encode_report(report)]})
+
+
+def _iso(day: Any) -> str | None:
+    return day.isoformat() if day is not None else None
 
 
 def _example(row: dict[str, Any], problems: list[str]) -> dict[str, Any]:

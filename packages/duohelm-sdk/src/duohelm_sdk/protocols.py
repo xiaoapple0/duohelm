@@ -124,7 +124,16 @@ class DataSourcePlugin(Protocol):
         ...
 
     def index_constituents(self, index: str, start: date, end: date) -> pl.DataFrame:
-        """列：symbol、in_date、out_date（仍在指数中则为 null）。"""
+        """列：symbol、in_date、out_date。
+
+        成分关系按半开区间 [in_date, out_date) 解释，日期是北京时间的交易所日期：
+
+        - ``in_date``：调入生效日，这一天已经是成分。数据源不知道调入日期时为 null
+        - ``out_date``：调出生效日，即**第一天不再是成分**；最后一天仍是成分的日期是
+          ``out_date`` 的前一个交易日。仍在指数中则为 null。数据源给的是“最后一天仍是
+          成分”的日期时，插件要换算成下一个交易日再填
+        - 只有当前成分、没有历史的数据源，``out_date`` 全为 null
+        """
         ...
 
 

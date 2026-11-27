@@ -8,6 +8,7 @@ import {
   LineChartOutlined,
   ScheduleOutlined,
   StockOutlined,
+  SyncOutlined,
   TransactionOutlined,
 } from "@ant-design/icons";
 import { Layout, Menu, Typography } from "antd";
@@ -18,6 +19,7 @@ import KlinePage from "./pages/kline/KlinePage";
 import OverviewPage from "./pages/OverviewPage";
 import PlaceholderPage from "./pages/PlaceholderPage";
 import PluginsPage from "./pages/PluginsPage";
+import DataSyncPage from "./pages/sync/DataSyncPage";
 import TaskCenterPage from "./pages/tasks/TaskCenterPage";
 
 interface NavItem {
@@ -41,6 +43,7 @@ const NAV: NavItem[] = [
       />
     ),
   },
+  { path: "/sync", label: "数据同步", icon: <SyncOutlined />, element: <DataSyncPage /> },
   {
     path: "/universe",
     label: "股票池",

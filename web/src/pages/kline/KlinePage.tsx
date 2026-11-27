@@ -14,6 +14,7 @@ import {
 import type { Known, Slot } from "./analysis";
 import { addDays, isIsoDate, shanghaiToday } from "./dates";
 import KlineChart from "./KlineChart";
+import { TEXT } from "./text";
 
 interface Params {
   symbol: string;
@@ -40,12 +41,6 @@ type View =
       tailFrom: string | null;
       ex: Known<number>;
     };
-
-const ADJUST_LABELS: Record<AdjustMode, string> = {
-  none: "不复权",
-  hfq: "后复权",
-  qfq: "前复权",
-};
 
 function errorView(err: unknown): View {
   if (err instanceof ApiError && err.status === 422) {
@@ -74,7 +69,7 @@ async function load(p: Params): Promise<View> {
   const [security, calendar, other] = await Promise.all([
     known(dataApi.securities({ snapshot, symbol: p.symbol })),
     p.symbol === CALENDAR_SYMBOL
-      ? Promise.resolve<Known<BarsOut>>({ known: false, reason: "所选证券就是参考指数" })
+      ? Promise.resolve<Known<BarsOut>>({ known: false, reason: TEXT.reason.isCalendar })
       : known(dataApi.bars(CALENDAR_SYMBOL, { ...range, adjust: "none" })),
     known(dataApi.bars(p.symbol, { ...range, adjust: otherAdjust(p.adjust) })),
   ]);
@@ -85,18 +80,17 @@ async function load(p: Params): Promise<View> {
   let suspension: Known<number>;
   let tailFrom: string | null = null;
   if (p.symbol === CALENDAR_SYMBOL) {
-    suspension = { known: true, value: 0 };
+    // 没有参考日历，无法发现它自己缺的日子：未知，不是 0
+    suspension = { known: false, reason: TEXT.reason.isCalendar };
   } else if (!security.known || sec === undefined) {
     suspension = {
       known: false,
-      reason: security.known
-        ? "证券列表里没有这只证券的信息，不知道上市日和退市日"
-        : `证券信息读取失败：${security.reason}`,
+      reason: security.known ? TEXT.reason.noSecurity : TEXT.reason.securityFailed(security.reason),
     };
   } else if (!calendar.known) {
-    suspension = { known: false, reason: `参考日历（${CALENDAR_SYMBOL}）读取失败：${calendar.reason}` };
+    suspension = { known: false, reason: TEXT.reason.calendarFailed(CALENDAR_SYMBOL, calendar.reason) };
   } else if (calendar.value.empty) {
-    suspension = { known: false, reason: `参考日历（${CALENDAR_SYMBOL}）在区间内没有日线` };
+    suspension = { known: false, reason: TEXT.reason.calendarEmpty(CALENDAR_SYMBOL) };
   } else {
     const gaps = gapDates(
       result,
@@ -186,7 +180,7 @@ function SecuritySelect({
     <Select
       showSearch
       style={{ width: 260 }}
-      placeholder="输入名称前缀或代码，如 600000.SH"
+      placeholder={TEXT.select.placeholder}
       filterOption={false}
       loading={searching}
       value={value}
@@ -195,10 +189,10 @@ function SecuritySelect({
         timer.current = window.setTimeout(() => search(text), 300);
       }}
       onChange={onChange}
-      notFoundContent={failed ? `证券列表未知：${failed}` : searching ? <Spin size="small" /> : "没有匹配的证券"}
+      notFoundContent={failed ? TEXT.select.listUnknown(failed) : searching ? <Spin size="small" /> : TEXT.select.noMatch}
       options={options.map((s) => ({
         value: s.symbol,
-        label: `${s.name ?? "（无名称）"}　${s.symbol}`,
+        label: `${s.name ?? TEXT.select.noName}　${s.symbol}`,
       }))}
     />
   );
@@ -206,9 +200,9 @@ function SecuritySelect({
 
 function KnownTag({ label, info, unit }: { label: string; info: Known<number>; unit: string }) {
   return info.known ? (
-    <Tag>{`${label}：${info.value} ${unit}`}</Tag>
+    <Tag>{TEXT.tag.known(label, info.value, unit)}</Tag>
   ) : (
-    <Tag color="warning" title={info.reason}>{`${label}：未知`}</Tag>
+    <Tag color="warning" title={info.reason}>{TEXT.tag.unknown(label)}</Tag>
   );
 }
 
@@ -240,15 +234,15 @@ export default function KlinePage() {
 
   const onSubmit = () => {
     if (!symbol) {
-      setFormError("请先选择证券");
+      setFormError(TEXT.form.needSymbol);
       return;
     }
     if (!isIsoDate(start) || !isIsoDate(end)) {
-      setFormError("起止日期必须是有效的日期");
+      setFormError(TEXT.form.badDate);
       return;
     }
     if (start > end) {
-      setFormError("起始日期晚于结束日期");
+      setFormError(TEXT.form.startAfterEnd);
       return;
     }
     setFormError(undefined);
@@ -256,67 +250,67 @@ export default function KlinePage() {
   };
 
   return (
-    <Card title="K 线查看">
+    <Card title={TEXT.title}>
       <Space wrap style={{ marginBottom: 16 }}>
         <SecuritySelect value={symbol} onChange={setSymbol} />
         <Input
           type="date"
           value={start}
           onChange={(e) => setStart(e.target.value)}
-          aria-label="起始日期"
+          aria-label={TEXT.form.startLabel}
           style={{ width: 150 }}
         />
-        <span>至</span>
+        <span>{TEXT.form.to}</span>
         <Input
           type="date"
           value={end}
           onChange={(e) => setEnd(e.target.value)}
-          aria-label="结束日期"
+          aria-label={TEXT.form.endLabel}
           style={{ width: 150 }}
         />
         <Radio.Group
           value={adjust}
           onChange={(e) => setAdjust(e.target.value as AdjustMode)}
           optionType="button"
-          options={(Object.keys(ADJUST_LABELS) as AdjustMode[]).map((m) => ({
+          options={(Object.keys(TEXT.adjust) as AdjustMode[]).map((m) => ({
             value: m,
-            label: ADJUST_LABELS[m],
+            label: TEXT.adjust[m],
           }))}
         />
         <Button type="primary" onClick={onSubmit} loading={view.kind === "loading"}>
-          查看
+          {TEXT.submit}
         </Button>
       </Space>
       <div style={{ color: "#8c8c8c", fontSize: 12, marginBottom: 12 }}>
-        日期是北京时间的交易日。前复权以所选区间的最后一根日线为基准。
+        {TEXT.timeNote}
       </div>
 
       {formError && <Alert type="warning" showIcon message={formError} style={{ marginBottom: 12 }} />}
 
-      {view.kind === "idle" && <Alert type="info" showIcon message="选择证券后点“查看”。" />}
+      {view.kind === "idle" && <Alert type="info" showIcon message={TEXT.idle} />}
       {view.kind === "loading" && <Spin />}
       {view.kind === "unknown" && (
         <Alert
           type="error"
           showIcon
-          message="未知：没有取到数据"
-          description={`${view.message}。这不表示这段时间没有行情，只是没读到。`}
+          message={TEXT.unknown.title}
+          description={TEXT.unknown.description(view.message)}
         />
       )}
       {view.kind === "invalid" && (
-        <Alert type="error" showIcon message="请求参数不合法" description={view.message} />
+        <Alert type="error" showIcon message={TEXT.invalid.title} description={view.message} />
       )}
       {view.kind === "empty" && (
         <Alert
           type="info"
           showIcon
-          message="没有数据：这只证券在所选区间内没有日线"
+          message={TEXT.empty.title}
           description={
             <>
-              可能是区间在上市前、退市后，或整段停牌。
+              {TEXT.empty.reasons}
               {view.result.last_bar_date
-                ? `这只证券在快照里的最后一根日线是 ${view.result.last_bar_date}。`
-                : "这只证券在快照里没有任何日线。"}
+                ? TEXT.empty.lastBar(view.result.last_bar_date)
+                : TEXT.empty.noBar}
               {view.result.last_bar_date && (
                 <Button
                   type="link"
@@ -330,7 +324,7 @@ export default function KlinePage() {
                     }
                   }}
                 >
-                  跳到最后一根日线
+                  {TEXT.empty.jump}
                 </Button>
               )}
             </>
@@ -340,24 +334,24 @@ export default function KlinePage() {
       {view.kind === "ok" && (
         <>
           <Descriptions size="small" column={2} style={{ marginBottom: 8 }}>
-            <Descriptions.Item label="证券">{view.result.symbol}</Descriptions.Item>
-            <Descriptions.Item label="复权">
-              {ADJUST_LABELS[view.result.adjust]}
-              {view.result.base_date ? `（基准日 ${view.result.base_date}）` : ""}
+            <Descriptions.Item label={TEXT.summary.symbol}>{view.result.symbol}</Descriptions.Item>
+            <Descriptions.Item label={TEXT.summary.adjust}>
+              {TEXT.adjust[view.result.adjust]}
+              {view.result.base_date ? TEXT.summary.baseDate(view.result.base_date) : ""}
             </Descriptions.Item>
-            <Descriptions.Item label="日线">{view.result.bars.length} 根</Descriptions.Item>
-            <Descriptions.Item label="快照">{view.result.snapshot.slice(0, 12)}</Descriptions.Item>
+            <Descriptions.Item label={TEXT.summary.bars}>{TEXT.summary.barsUnit(view.result.bars.length)}</Descriptions.Item>
+            <Descriptions.Item label={TEXT.summary.snapshot}>{view.result.snapshot.slice(0, 12)}</Descriptions.Item>
           </Descriptions>
           <Space wrap style={{ marginBottom: 8 }}>
-            <KnownTag label="停牌或缺数据" info={view.suspension} unit="天" />
-            <KnownTag label="除权" info={view.ex} unit="次" />
+            <KnownTag label={TEXT.tag.suspension} info={view.suspension} unit={TEXT.tag.suspensionUnit} />
+            <KnownTag label={TEXT.tag.ex} info={view.ex} unit={TEXT.tag.exUnit} />
           </Space>
           {!view.suspension.known && (
             <Alert
               type="warning"
               showIcon
               style={{ marginBottom: 8 }}
-              message="停牌或缺数据的日子未知，图上没有标注"
+              message={TEXT.warn.suspensionTitle}
               description={view.suspension.reason}
             />
           )}
@@ -366,8 +360,8 @@ export default function KlinePage() {
               type="warning"
               showIcon
               style={{ marginBottom: 8 }}
-              message={`${view.tailFrom} 起是否停牌未知，图上没有标注`}
-              description="这只证券没有退市日，最后一根日线之后到区间结束的日子，可能在停牌，也可能数据还没同步，分不出来。"
+              message={TEXT.warn.tailTitle(view.tailFrom)}
+              description={TEXT.warn.tailDescription}
             />
           )}
           {!view.ex.known && (
@@ -375,7 +369,7 @@ export default function KlinePage() {
               type="warning"
               showIcon
               style={{ marginBottom: 8 }}
-              message="除权日未知，图上没有标注除权"
+              message={TEXT.warn.exTitle}
               description={view.ex.reason}
             />
           )}

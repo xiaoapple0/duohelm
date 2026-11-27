@@ -37,7 +37,7 @@ const NAV: NavItem[] = [
       <PlaceholderPage
         title="行情管理"
         milestone="M1"
-        description="配置数据源、同步行情、查看数据覆盖和质量、K 线查看。"
+        description="配置数据源、同步行情、查看数据覆盖和质量。K 线查看已是独立页面（/kline）。"
       />
     ),
   },

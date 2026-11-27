@@ -3,6 +3,7 @@ import type { MouseEvent } from "react";
 
 import { extent, isComplete, ticks } from "./analysis";
 import type { Slot } from "./analysis";
+import { TEXT as T } from "./text";
 
 const W = 1000;
 const H = 560;
@@ -24,20 +25,20 @@ const EX = "#d46b08";
 const MISSING = "#722ed1";
 
 function fmtPrice(v: number | null): string {
-  return v === null ? "缺失" : v.toFixed(2);
+  return v === null ? T.chart.missing : v.toFixed(2);
 }
 
 function fmtVolume(v: number | null): string {
   if (v === null) {
-    return "缺失";
+    return T.chart.missing;
   }
   if (v >= 1e8) {
-    return `${(v / 1e8).toFixed(2)} 亿股`;
+    return `${(v / 1e8).toFixed(2)} ${T.chart.volumeBillion}`;
   }
   if (v >= 1e4) {
-    return `${(v / 1e4).toFixed(2)} 万股`;
+    return `${(v / 1e4).toFixed(2)} ${T.chart.volumeTenThousand}`;
   }
-  return `${v} 股`;
+  return `${v} ${T.chart.volumeShares}`;
 }
 
 function fmtAxisVolume(v: number): string {
@@ -45,10 +46,10 @@ function fmtAxisVolume(v: number): string {
     return "0";
   }
   if (v >= 1e8) {
-    return `${+(v / 1e8).toFixed(2)}亿`;
+    return `${+(v / 1e8).toFixed(2)}${T.chart.axisBillion}`;
   }
   if (v >= 1e4) {
-    return `${+(v / 1e4).toFixed(2)}万`;
+    return `${+(v / 1e4).toFixed(2)}${T.chart.axisTenThousand}`;
   }
   return String(v);
 }
@@ -56,10 +57,10 @@ function fmtAxisVolume(v: number): string {
 function describe(slot: Slot): string {
   const tags: string[] = [];
   if (slot.suspended) {
-    tags.push("停牌或缺数据（参考日历有、这只证券没有日线）");
+    tags.push(T.chart.suspendedTip);
   }
   if (slot.exDate) {
-    tags.push("除权");
+    tags.push(T.chart.exTip);
   }
   const bar = slot.bar;
   if (bar === null) {
@@ -67,11 +68,11 @@ function describe(slot: Slot): string {
   }
   return [
     slot.date,
-    `开 ${fmtPrice(bar.open)}`,
-    `高 ${fmtPrice(bar.high)}`,
-    `低 ${fmtPrice(bar.low)}`,
-    `收 ${fmtPrice(bar.close)}`,
-    `量 ${fmtVolume(bar.volume)}`,
+    `${T.chart.open} ${fmtPrice(bar.open)}`,
+    `${T.chart.high} ${fmtPrice(bar.high)}`,
+    `${T.chart.low} ${fmtPrice(bar.low)}`,
+    `${T.chart.close} ${fmtPrice(bar.close)}`,
+    `${T.chart.volume} ${fmtVolume(bar.volume)}`,
     ...tags,
   ].join("　");
 }
@@ -123,13 +124,13 @@ export default function KlineChart({ slots }: { slots: Slot[] }) {
   return (
     <div>
       <div style={{ minHeight: 24, fontSize: 13, color: TEXT, marginBottom: 4 }}>
-        {active ? describe(active) : "把鼠标移到图上查看每天的数据"}
+        {active ? describe(active) : T.chart.hoverHint}
       </div>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         width="100%"
         role="img"
-        aria-label="K 线和成交量"
+        aria-label={T.chart.ariaLabel}
         onMouseMove={onMove}
         onMouseLeave={() => setHover(null)}
         style={{ display: "block", maxWidth: "100%" }}
@@ -175,7 +176,7 @@ export default function KlineChart({ slots }: { slots: Slot[] }) {
                     strokeDasharray="4 3"
                   />
                   <text x={x} y={PRICE_TOP + 10} fontSize={11} textAnchor="middle" fill={EX}>
-                    除
+                    {T.chart.exMark}
                   </text>
                 </g>
               )}
@@ -205,20 +206,20 @@ export default function KlineChart({ slots }: { slots: Slot[] }) {
 
         <line x1={LEFT} x2={LEFT} y1={PRICE_TOP} y2={VOL_BOTTOM} stroke="#d9d9d9" />
         <text x={LEFT} y={PRICE_TOP - 4} fontSize={11} fill={TEXT}>
-          价格
+          {T.chart.priceAxis}
         </text>
         <text x={LEFT} y={VOL_TOP - 4} fontSize={11} fill={TEXT}>
-          成交量（股，不复权）
+          {T.chart.volumeAxis}
         </text>
 
         {/* 图例 */}
         <g fontSize={11} fill={TEXT} transform={`translate(${LEFT}, ${H - 18})`}>
           <rect x={0} y={-9} width={10} height={10} fill={SUSPEND} stroke="#8c8c8c" />
-          <text x={14} y={0}>停牌或缺数据</text>
+          <text x={14} y={0}>{T.chart.legendSuspended}</text>
           <line x1={110} x2={110} y1={-10} y2={2} stroke={EX} strokeDasharray="3 2" />
-          <text x={116} y={0}>除权日</text>
+          <text x={116} y={0}>{T.chart.legendEx}</text>
           <rect x={180} y={-9} width={10} height={10} fill={MISSING} />
-          <text x={194} y={0}>价格缺失</text>
+          <text x={194} y={0}>{T.chart.legendMissing}</text>
         </g>
       </svg>
     </div>

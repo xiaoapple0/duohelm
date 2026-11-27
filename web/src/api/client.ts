@@ -1,7 +1,8 @@
 // 后端接口的类型从 OpenAPI 生成（schema.d.ts，由 `npm run gen:api` 生成，不要手改）。
-// 这里只给生成的类型起前端用的名字；查询参数类型和 data.sync 的结果
-// （后端的任务 result 是自由格式，OpenAPI 里没有字段）仍手写。
-import type { components } from "./schema";
+// 这里只给生成的类型起前端用的名字。手写的只剩 OpenAPI 里没有字段的内容：
+// data.sync 的结果 DataSyncResult（后端的任务 result 是自由格式）。
+// 查询参数里 null 和省略等价（query() 都不带这个参数）。
+import type { components, operations } from "./schema";
 
 type Schemas = components["schemas"];
 
@@ -41,11 +42,7 @@ export type Task = Schemas["TaskOut"];
 export type TaskLog = Schemas["TaskLogOut"];
 export type TaskTypeInfo = Schemas["TaskTypeOut"];
 
-export interface TaskQuery {
-  status?: TaskStatus;
-  type?: string;
-  limit?: number;
-}
+export type TaskQuery = NonNullable<operations["list_tasks_api_tasks_get"]["parameters"]["query"]>;
 
 export type TaskCreate = Schemas["TaskCreate"];
 
@@ -158,10 +155,10 @@ function deleteJson<T>(path: string): Promise<T> {
   return request<T>(path, { method: "DELETE" });
 }
 
-export function query(params: Record<string, string | number | undefined>): string {
+export function query(params: Record<string, string | number | null | undefined>): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined) {
+    if (value !== undefined && value !== null) {
       search.set(key, String(value));
     }
   }

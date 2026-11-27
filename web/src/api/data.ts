@@ -1,6 +1,6 @@
 // 行情读取接口 /api/data 的类型和调用。类型从 OpenAPI 生成（schema.d.ts，`npm run gen:api`）。
 import { getJson, query } from "./client";
-import type { components } from "./schema";
+import type { components, operations } from "./schema";
 
 type Schemas = components["schemas"];
 
@@ -40,28 +40,18 @@ export type CoverageGroup = Schemas["CoverageGroupOut"];
 /** as_of 是判定在市/退市用的北京日期。 */
 export type CoverageSummaryOut = Schemas["CoverageSummaryOut"];
 
-export interface CoverageQuery {
-  snapshot?: string;
-  kind?: string;
-  limit?: number;
-  offset?: number;
-}
+export type CoverageQuery = NonNullable<
+  operations["coverage_api_data_coverage_get"]["parameters"]["query"]
+>;
 
-export interface SecuritiesQuery {
-  snapshot?: string;
-  symbol?: string;
-  name_prefix?: string;
-  kind?: string;
-  limit?: number;
-  offset?: number;
-}
+export type SecuritiesQuery = NonNullable<
+  operations["securities_api_data_securities_get"]["parameters"]["query"]
+>;
 
-export interface BarsQuery {
-  snapshot?: string;
-  start?: string;
-  end?: string;
-  adjust?: AdjustMode;
-}
+/** 含后端的 base_date（前复权基准日）；页面暂时不用它。 */
+export type BarsQuery = NonNullable<
+  operations["bars_api_data_securities__symbol__bars_get"]["parameters"]["query"]
+>;
 
 export const dataApi = {
   snapshots: (limit = 200) => getJson<SnapshotsOut>(`/api/data/snapshots${query({ limit })}`),

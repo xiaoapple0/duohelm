@@ -35,6 +35,7 @@ from duohelm.settings import Settings
 from duohelm.storage import DATASETS, DataStore, SnapshotConflictError
 from duohelm.storage.datasets import OBSERVED_AT
 from duohelm.storage.store import Transaction
+from duohelm.tasks.delist_merge import examples, merge_delist_dates
 from duohelm.tasks.delisted import DEFAULT_RESCAN_DAYS, discover_securities
 from duohelm.tasks.quality import QualityCollector, report_frame, report_statuses
 from duohelm.tasks.snapshots import (
@@ -269,6 +270,7 @@ def _run(
         securities = known_securities(scan.securities).sort("symbol")
         scanned, rescanned, rechecked = scan.scanned, scan.rescanned, scan.rechecked
         base = 0.3
+    securities, delist_quality = _merge_delist_dates(ctx, data, securities, caps, plugin_id)
     ctx.progress(base, "交易日历")
     calendar = fetch_calendar(session, start, end)
     symbols = symbols_in_range(securities, start, end)
@@ -297,25 +299,15 @@ def _run(
         now=now,
         indexes=indexes,
     )
-    if not caps.exact_delist_date:
-        ctx.log(f"插件 {plugin_id} 的退市日是近似值，记进 delist_date_quality")
     dropped = 0
-    collector = QualityCollector(
-        calendar,
-        securities,
-        start,
-        end,
-        delist_quality=delist_date_quality(securities, caps),
-    )
+    collector = QualityCollector(calendar, securities, start, end, delist_quality=delist_quality)
     batches = [symbols[i : i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
     try:
         with data.transaction(
             task_id=ctx.task_id, note=f"data.sync {plugin_id} {start}..{end}"
         ) as tx:
             written["securities"] = tx.write("securities", securities)
-            written["delist_date_quality"] = tx.write(
-                "delist_date_quality", delist_date_quality(securities, caps)
-            )
+            written["delist_date_quality"] = tx.write("delist_date_quality", delist_quality)
             written["calendar"] = tx.write("calendar", calendar)
             written |= _write_snapshots(tx, data, snap)
             for i, batch in enumerate(batches):
@@ -533,14 +525,44 @@ def redact(message: str, addresses: Mapping[str, str]) -> str:
     return message
 
 
-def delist_date_quality(securities: pl.DataFrame, caps: Capabilities) -> pl.DataFrame:
-    """每只证券一行：有退市日的按数据源的声明记精确或近似，仍在市的为 null。"""
-    return securities.select(
-        "symbol",
-        exact=pl.when(pl.col("delist_date").is_not_null())
-        .then(pl.lit(caps.exact_delist_date))
-        .otherwise(pl.lit(None, dtype=pl.Boolean())),
+def _merge_delist_dates(
+    ctx: TaskContext, data: DataStore, securities: pl.DataFrame, caps: Capabilities, source: str
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """和当前快照里已有的证券合并退市日（精确的优先，见 delist_merge），返回 (证券, 质量)。
+
+    质量每只证券一行：有退市日的按数据源的声明记精确或近似，仍在市的为 null。
+    """
+    if not caps.exact_delist_date:
+        ctx.log(f"插件 {source} 的退市日是近似值，记进 delist_date_quality")
+    if data.head() is None:
+        existing, existing_quality = (
+            securities.clear(),
+            pl.DataFrame(schema=DATASETS["delist_date_quality"].schema),
+        )
+    else:
+        existing = data.read("securities")
+        existing_quality = data.read("delist_date_quality")
+    merged = merge_delist_dates(
+        securities, existing, existing_quality, exact=caps.exact_delist_date, source=source
     )
+    if merged.kept_exact:
+        ctx.log(
+            f"{len(merged.kept_exact)} 只证券已有别的数据源给的精确退市日，保留它而不用"
+            f"这次的值，例如 {examples(merged.kept_exact)}"
+        )
+    if merged.kept_delisted:
+        ctx.log(
+            f"{len(merged.kept_delisted)} 只证券这次的数据源说在市，但已有的退市日（近似值）"
+            f"说已退市：不知道谁对，按已退市处理，例如 {examples(merged.kept_delisted)}",
+            "warning",
+        )
+    if merged.conflicts:
+        ctx.log(
+            f"{len(merged.conflicts)} 只证券两个数据源给的精确退市日不同，以这次的为准，"
+            f"例如 {examples(merged.conflicts)}",
+            "warning",
+        )
+    return merged.securities, merged.quality
 
 
 def check_capabilities(plugin_id: str, caps: Any) -> Capabilities:

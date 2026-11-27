@@ -9,7 +9,7 @@ import {
   buildSlots,
   exDates,
   otherAdjust,
-  suspendedDates,
+  gapDates,
 } from "./analysis";
 import type { Known, Slot } from "./analysis";
 import { addDays, isIsoDate, shanghaiToday } from "./dates";
@@ -36,6 +36,8 @@ type View =
       result: BarsOut;
       slots: Slot[];
       suspension: Known<number>;
+      /** 没有退市日的证券：这一天起（最后一根日线之后）是否停牌未知，没有标注 */
+      tailFrom: string | null;
       ex: Known<number>;
     };
 
@@ -81,18 +83,28 @@ async function load(p: Params): Promise<View> {
 
   let suspended: string[] = [];
   let suspension: Known<number>;
+  let tailFrom: string | null = null;
   if (p.symbol === CALENDAR_SYMBOL) {
     suspension = { known: true, value: 0 };
+  } else if (!security.known || sec === undefined) {
+    suspension = {
+      known: false,
+      reason: security.known
+        ? "证券列表里没有这只证券的信息，不知道上市日和退市日"
+        : `证券信息读取失败：${security.reason}`,
+    };
   } else if (!calendar.known) {
     suspension = { known: false, reason: `参考日历（${CALENDAR_SYMBOL}）读取失败：${calendar.reason}` };
   } else if (calendar.value.empty) {
     suspension = { known: false, reason: `参考日历（${CALENDAR_SYMBOL}）在区间内没有日线` };
   } else {
-    suspended = suspendedDates(
+    const gaps = gapDates(
       result,
       sec,
       calendar.value.bars.map((b) => b.date),
     );
+    suspended = gaps.dates;
+    tailFrom = gaps.unknownFrom;
     suspension = { known: true, value: suspended.length };
   }
 
@@ -110,6 +122,7 @@ async function load(p: Params): Promise<View> {
     result,
     slots: buildSlots(result.bars, suspended, ex),
     suspension,
+    tailFrom,
     ex: exInfo,
   };
 }
@@ -336,7 +349,7 @@ export default function KlinePage() {
             <Descriptions.Item label="快照">{view.result.snapshot.slice(0, 12)}</Descriptions.Item>
           </Descriptions>
           <Space wrap style={{ marginBottom: 8 }}>
-            <KnownTag label="停牌" info={view.suspension} unit="天" />
+            <KnownTag label="停牌或缺数据" info={view.suspension} unit="天" />
             <KnownTag label="除权" info={view.ex} unit="次" />
           </Space>
           {!view.suspension.known && (
@@ -344,8 +357,17 @@ export default function KlinePage() {
               type="warning"
               showIcon
               style={{ marginBottom: 8 }}
-              message="停牌日未知，图上没有标注停牌"
+              message="停牌或缺数据的日子未知，图上没有标注"
               description={view.suspension.reason}
+            />
+          )}
+          {view.tailFrom && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 8 }}
+              message={`${view.tailFrom} 起是否停牌未知，图上没有标注`}
+              description="这只证券没有退市日，最后一根日线之后到区间结束的日子，可能在停牌，也可能数据还没同步，分不出来。"
             />
           )}
           {!view.ex.known && (

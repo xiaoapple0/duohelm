@@ -13,13 +13,14 @@ export function isIsoDate(text: string): boolean {
 
 /** 现在的北京日期（Asia/Shanghai），不依赖本机时区。 */
 export function shanghaiToday(now: number = Date.now()): string {
-  // en-CA 的日期格式就是 YYYY-MM-DD
-  return new Intl.DateTimeFormat("en-CA", {
+  const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Shanghai",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).format(new Date(now));
+  }).formatToParts(new Date(now));
+  const pick = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${pick("year")}-${pick("month")}-${pick("day")}`;
 }
 
 export function addDays(date: string, days: number): string {

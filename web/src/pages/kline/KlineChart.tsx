@@ -56,7 +56,7 @@ function fmtAxisVolume(v: number): string {
 function describe(slot: Slot): string {
   const tags: string[] = [];
   if (slot.suspended) {
-    tags.push("停牌（参考日历有、这只证券没有日线）");
+    tags.push("停牌或缺数据（参考日历有、这只证券没有日线）");
   }
   if (slot.exDate) {
     tags.push("除权");
@@ -214,11 +214,11 @@ export default function KlineChart({ slots }: { slots: Slot[] }) {
         {/* 图例 */}
         <g fontSize={11} fill={TEXT} transform={`translate(${LEFT}, ${H - 18})`}>
           <rect x={0} y={-9} width={10} height={10} fill={SUSPEND} stroke="#8c8c8c" />
-          <text x={14} y={0}>停牌</text>
-          <line x1={60} x2={60} y1={-10} y2={2} stroke={EX} strokeDasharray="3 2" />
-          <text x={66} y={0}>除权日</text>
-          <rect x={130} y={-9} width={10} height={10} fill={MISSING} />
-          <text x={144} y={0}>价格缺失</text>
+          <text x={14} y={0}>停牌或缺数据</text>
+          <line x1={110} x2={110} y1={-10} y2={2} stroke={EX} strokeDasharray="3 2" />
+          <text x={116} y={0}>除权日</text>
+          <rect x={180} y={-9} width={10} height={10} fill={MISSING} />
+          <text x={194} y={0}>价格缺失</text>
         </g>
       </svg>
     </div>

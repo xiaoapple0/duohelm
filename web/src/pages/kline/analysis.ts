@@ -13,8 +13,9 @@ const EX_EPSILON = 1e-6;
 
 export interface Slot {
   date: string;
-  /** null：这一天没有日线（停牌，或没有参考日历时不会出现） */
+  /** null：这一天没有日线（停牌或缺数据） */
   bar: Bar | null;
+  /** 参考日历有、这只证券没有日线：停牌或缺数据，分不出来 */
   suspended: boolean;
   exDate: boolean;
 }
@@ -28,22 +29,34 @@ export function isComplete(bar: Bar): bar is Bar & {
   return bar.open !== null && bar.high !== null && bar.low !== null && bar.close !== null;
 }
 
+export interface GapResult {
+  /** 参考日历有、这只证券没有日线的日子：停牌或缺数据，入库时没有保存停牌日，两者分不出来 */
+  dates: string[];
+  /**
+   * 没有退市日的证券，最后一根日线之后到区间结束的日子无法判断（可能正在停牌，也可能
+   * 还没同步），不标；这个值是第一个这样的日子，没有这种日子时为 null。
+   */
+  unknownFrom: string | null;
+}
+
 /**
- * 停牌区间：证券上市（没有 list_date 时用区间内第一根日线）到退市（没有 delist_date 时用
- * 这只证券在快照里最后一根日线）之间。上市前、退市后不算停牌；退市日未知又没有日线时不标。
+ * 缺日线的日子：证券上市（没有 list_date 时用区间内第一根日线）到退市日（没有 delist_date
+ * 时用这只证券在快照里最后一根日线）之间。上市前、退市后不算。
  */
-export function suspendedDates(
+export function gapDates(
   result: BarsOut,
-  security: Security | undefined,
+  security: Security,
   calendar: string[],
-): string[] {
+): GapResult {
   const have = new Set(result.bars.map((b) => b.date));
-  const from = security?.list_date ?? result.bars[0]?.date ?? null;
-  const to = security?.delist_date ?? result.last_bar_date;
+  const from = security.list_date ?? result.bars[0]?.date ?? null;
+  const to = security.delist_date ?? result.last_bar_date;
   if (from === null || to === null) {
-    return [];
+    return { dates: [], unknownFrom: null };
   }
-  return calendar.filter((d) => !have.has(d) && d >= from && d <= to);
+  const unknownFrom =
+    security.delist_date === null ? (calendar.find((d) => d > to) ?? null) : null;
+  return { dates: calendar.filter((d) => !have.has(d) && d >= from && d <= to), unknownFrom };
 }
 
 /**

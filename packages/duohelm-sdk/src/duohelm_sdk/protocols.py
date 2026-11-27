@@ -55,6 +55,14 @@ class ConnectionStatus:
     """失败时给用户看的说明，例如“连不上 MiniQMT，请打开并登录”。不要写入密码等凭据。"""
 
 
+class LookupFailedError(Exception):
+    """:meth:`DataSourcePlugin.lookup_securities` 查询失败（SDK 0.4.2 起）。
+
+    表示“不知道”，不是“没有”：平台不会把这批代码记为没找到。返回空结果才表示确定没有。
+    抛别的异常的旧插件，平台照旧按插件出错处理。
+    """
+
+
 @runtime_checkable
 class SupportsConnectionCheck(Protocol):
     """可选：插件能快速检查数据源是否连得上（SDK 0.3 起）。
@@ -88,6 +96,11 @@ class DataSourcePlugin(Protocol):
         只返回数据源有记录的代码；已退市的证券 delist_date 不为空。不能直接列出退市
         证券的插件（``lists_delisted`` 为 False），平台用它扫描代码区间发现退市股；扫描
         结果由平台保存，没找到的代码不会重复查询，找到过的退市证券每次同步都重新查询。
+
+        **返回空结果（或结果里没有某个代码）表示“确定没有这个代码”**，平台会把它记为没找到，
+        过一段时间才重查。查询失败（连不上数据源、数据源返回了不可信的结果、一时拿不到）时，
+        必须抛 :class:`LookupFailedError`，不要返回空结果：平台把这批代码记为“未知”，
+        这次同步失败，下次同步照常重查（SDK 0.4.2 起）。
         """
         ...
 

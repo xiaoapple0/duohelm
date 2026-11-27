@@ -16,7 +16,7 @@ import pydantic
 import pytest
 
 from duohelm.endpoints import EndpointStore
-from duohelm.isolation import Limits, PluginRunError
+from duohelm.isolation import Limits, PluginRunError, session_for
 from duohelm.registry import PluginRegistry
 from duohelm.settings import Settings
 from duohelm.storage import DataStore, SnapshotConflictError
@@ -34,7 +34,7 @@ id = "fake-src"
 name = "fake-src"
 version = "1.0.0"
 kind = "datasource"
-sdk = ">=0.4,<0.5"
+sdk = ">=0.4.2,<0.5"
 entrypoint = "fake_src:source"
 
 [[permissions.endpoints]]
@@ -44,6 +44,16 @@ default = "127.0.0.1:1"
 scope = "loopback"
 """
 
+LEGACY_SDK = ">=0.4,<0.5"
+"""不导入 LookupFailedError 的旧插件的清单范围（SDK 0.4.2 之前写的插件）。"""
+IMPORT_LOOKUP_FAILED = """from duohelm_sdk import (
+    Capabilities, ConnectionStatus, EndpointNotConfiguredError, Freq, LookupFailedError, endpoint,
+)"""
+IMPORT_LEGACY = (
+    "from duohelm_sdk import "
+    "Capabilities, ConnectionStatus, EndpointNotConfiguredError, Freq, endpoint"
+)
+
 PLUGIN_CODE = """
 import json
 import time
@@ -51,7 +61,9 @@ from datetime import date
 from pathlib import Path
 
 import polars as pl
-from duohelm_sdk import Capabilities, ConnectionStatus, EndpointNotConfiguredError, Freq, endpoint
+from duohelm_sdk import (
+    Capabilities, ConnectionStatus, EndpointNotConfiguredError, Freq, LookupFailedError, endpoint,
+)
 from duohelm_sdk.schema import ADJ_FACTORS_SCHEMA, BARS_SCHEMA, SECURITIES_SCHEMA
 
 HERE = Path(__file__).parent
@@ -105,6 +117,8 @@ class Plain:
 
     def lookup_securities(self, symbols):
         record(f"lookup {','.join(symbols)}")
+        if B.get("lookup_failed") in symbols:
+            raise LookupFailedError("数据源一时查不到")
         if B.get("lookup_fail") in symbols:
             raise RuntimeError("lookup 出错")
         lost = set(B.get("lookup_loses", []))
@@ -115,6 +129,8 @@ class Plain:
 
     def trading_calendar(self, market, start, end):
         record(f"trading_calendar {market}")
+        if B.get("calendar_lookup_failed"):
+            raise LookupFailedError("别的方法抛了它")
         skip = {date.fromisoformat(d) for d in B.get("calendar_skip", [])}
         return pl.DataFrame(
             {"date": [d for d in CALENDAR if start <= d <= end and d not in skip]},
@@ -205,11 +221,18 @@ def behave(plugin: Path, **behavior: Any) -> None:
     (plugin / "calls.txt").unlink(missing_ok=True)
 
 
-def install(settings: Settings, **behavior: Any) -> Path:
+def install(settings: Settings, *, legacy: bool = False, **behavior: Any) -> Path:
+    """legacy=True：SDK 0.4.2 之前写的旧插件，清单范围 ">=0.4,<0.5"，不导入 LookupFailedError。"""
     path = settings.plugin_dir / "fake-src"
     path.mkdir(parents=True)
-    (path / "duohelm-plugin.toml").write_text(MANIFEST, encoding="utf-8")
-    (path / "fake_src.py").write_text(textwrap.dedent(PLUGIN_CODE), encoding="utf-8")
+    manifest, code = MANIFEST, textwrap.dedent(PLUGIN_CODE)
+    if legacy:
+        manifest = manifest.replace('sdk = ">=0.4.2,<0.5"', f'sdk = "{LEGACY_SDK}"')
+        assert IMPORT_LOOKUP_FAILED in code
+        code = code.replace(IMPORT_LOOKUP_FAILED, IMPORT_LEGACY)
+        assert "LookupFailedError" not in code.replace("raise LookupFailedError", "")
+    (path / "duohelm-plugin.toml").write_text(manifest, encoding="utf-8")
+    (path / "fake_src.py").write_text(code, encoding="utf-8")
     (path / "behavior.json").write_text(json.dumps(behavior), encoding="utf-8")
     return path
 
@@ -638,6 +661,127 @@ def test_rescan_resumes_after_failure(settings: Settings, small_scan: None) -> N
     assert result.rescanned == 4
     *rescan_batches, _recheck = lookups(plugin)
     assert not {s for b in rescan_batches for s in b.split(",")} & set(done)
+
+
+# ---- lookup_securities 区分“没有”和“查询失败”（#56，SDK 0.4.2）----
+
+
+def scan_rows(settings: Settings) -> dict[str, tuple[int, int]]:
+    conn = sqlite3.connect(settings.data_dir / "catalog.db")
+    rows = conn.execute("SELECT symbol, found, scanned_at FROM security_scan").fetchall()
+    conn.close()
+    return {s: (f, t) for s, f, t in rows}
+
+
+def test_lookup_failed_crosses_process_boundary(settings: Settings, small_scan: None) -> None:
+    """插件抛 LookupFailedError：子进程单独报 lookup_failed，不退化成 plugin_error；
+    抛普通异常的旧插件仍是 plugin_error。"""
+    plugin = install(settings, lookup_failed="600008.SH")
+    confirm(settings)
+    [entry] = PluginRegistry([settings.plugin_dir]).scan()
+    endpoints = EndpointStore(settings.plugin_config_path)
+    with session_for(entry, endpoints, limits=FAST) as session:
+        with pytest.raises(PluginRunError) as info:
+            session.call("lookup_securities", ["600008.SH"])
+        assert info.value.reason == "lookup_failed"
+        assert "数据源一时查不到" in info.value.message
+        assert session.call("lookup_securities", ["600001.SH"]).height == 1  # 会话还能用
+    behave(plugin, lookup_fail="600008.SH")
+    with session_for(entry, endpoints, limits=FAST) as session:
+        with pytest.raises(PluginRunError) as info:
+            session.call("lookup_securities", ["600008.SH"])
+        assert info.value.reason == "plugin_error"
+
+
+def test_lookup_failed_from_other_method_stays_plugin_error(
+    settings: Settings, small_scan: None
+) -> None:
+    """只有 lookup_securities 抛它才是 lookup_failed；别的方法抛它仍是 plugin_error。"""
+    install(settings, calendar_lookup_failed=True)
+    confirm(settings)
+    [entry] = PluginRegistry([settings.plugin_dir]).scan()
+    with session_for(entry, EndpointStore(settings.plugin_config_path), limits=FAST) as session:
+        with pytest.raises(PluginRunError) as info:
+            session.call("trading_calendar", "CN", START, END)
+        assert info.value.reason == "plugin_error"
+
+
+def test_lookup_failed_is_unknown_not_not_found(settings: Settings, small_scan: None) -> None:
+    """没扫过的一批代码查询失败：不记“没找到”；其余批次照常落库；任务失败、不写快照；
+    下次同步不用等重扫间隔就重查这批代码。"""
+    plugin = install(settings, lists_delisted=False, lookup_failed="600008.SH")
+    confirm(settings)
+    store, task_id = run(settings)
+    error = failed(store, task_id)
+    assert "查询失败" in error and "600008.SH" in error
+    data = DataStore(settings.data_dir)
+    assert data.head() is None
+    rows = scan_rows(settings)
+    for s in ["600006.SH", "600007.SH", "600008.SH", "600009.SH", "000002.SZ"]:
+        assert s not in rows  # 失败的一批：没记录，不是“没找到”
+    assert rows["600001.SH"][0] == 1 and rows["000003.SZ"][0] == 0  # 其余批次照常记录
+    assert len(lookups(plugin)) == 3  # 失败后没有停：第三批照常查询
+
+    behave(plugin, lists_delisted=False)  # 数据源恢复
+    store, task_id = run(settings)  # 不 age：没有等重扫间隔
+    result = result_of(store, task_id)
+    assert result.scanned == 5
+    assert data.head() == result.snapshot_id
+
+
+def test_lookup_failed_in_rescan_keeps_symbols_due(settings: Settings, small_scan: None) -> None:
+    """重扫时查询失败：这批“没找到”的代码查询时间不更新，下次同步仍到期，照常重扫。"""
+    plugin = install(settings, lists_delisted=False)
+    confirm(settings)
+    run(settings)
+    age_not_found(settings, 8)
+    before = scan_rows(settings)
+    behave(plugin, lists_delisted=False, lookup_failed="600008.SH")
+    store, task_id = run(settings)
+    assert "查询失败" in failed(store, task_id)
+    after = scan_rows(settings)
+    for s in ["600006.SH", "600007.SH", "600008.SH", "600009.SH"]:
+        assert after[s] == before[s]  # 仍是“没找到”，查询时间没变
+    assert after["600002.SH"][1] > before["600002.SH"][1]  # 成功的一批更新了
+
+    behave(plugin, lists_delisted=False)
+    store, task_id = run(settings)
+    assert result_of(store, task_id).rescanned == 4  # 只剩失败的这批，仍到期
+
+
+def test_lookup_failed_in_recheck_is_unknown(settings: Settings, small_scan: None) -> None:
+    """重新查询扫到过的退市股时失败：任务失败，退市股仍记为扫到过，下次照常重新查询。"""
+    plugin = install(settings, lists_delisted=False)
+    confirm(settings)
+    run(settings)
+    behave(plugin, lists_delisted=False, lookup_failed="600005.SH")
+    store, task_id = run(settings)
+    assert "查询失败" in failed(store, task_id)
+    found = DataStore(settings.data_dir).catalog.found_symbols("fake-src")
+    assert {"600001.SH", "600005.SH"} <= set(found)
+    behave(plugin, lists_delisted=False)
+    store, task_id = run(settings)
+    assert result_of(store, task_id).rechecked == 2
+
+
+def test_empty_lookup_is_still_not_found(settings: Settings, small_scan: None) -> None:
+    """返回空结果仍表示“确定没有”：记为没找到，任务成功。"""
+    install(settings, lists_delisted=False, lookup_loses=["600001.SH"])
+    confirm(settings)
+    store, task_id = run(settings)
+    result_of(store, task_id)
+    assert scan_rows(settings)["600001.SH"][0] == 0
+
+
+def test_plain_exception_from_old_plugin_unchanged(settings: Settings, small_scan: None) -> None:
+    """不抛 LookupFailedError 的旧插件：抛普通异常时任务当场失败（plugin_error），
+    失败的批次不记录，后面的批次没有查询。"""
+    plugin = install(settings, legacy=True, lists_delisted=False, lookup_fail="600008.SH")
+    confirm(settings)
+    store, task_id = run(settings)
+    assert "plugin_error" in failed(store, task_id)
+    assert len(lookups(plugin)) == 2  # 第二批出错就停
+    assert "600008.SH" not in scan_rows(settings)
 
 
 def test_catalog_v2_rows_are_rescanned_after_migration(tmp_path: Path) -> None:

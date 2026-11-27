@@ -31,7 +31,7 @@ from duohelm.isolation.protocol import (
     read_message,
     write_message,
 )
-from duohelm_sdk import Address, DataSourcePlugin, FactorPlugin
+from duohelm_sdk import Address, DataSourcePlugin, FactorPlugin, LookupFailedError
 from duohelm_sdk import context as sdk_context
 
 ALLOWED_METHODS: dict[str, frozenset[str]] = {
@@ -145,7 +145,9 @@ def serve(proto_in: BinaryIO, proto_out: BinaryIO) -> int:
             write_message(proto_out, _error("memory", exc))
             continue
         except Exception as exc:
-            write_message(proto_out, _error("plugin_error", exc))
+            # LookupFailedError 用单独的错误类型，平台据此区分“查询失败（未知）”和别的插件错误
+            kind = "lookup_failed" if isinstance(exc, LookupFailedError) else "plugin_error"
+            write_message(proto_out, _error(kind, exc))
             continue
         try:
             write_message(proto_out, {"type": "result", "value": encode(result, frames)})

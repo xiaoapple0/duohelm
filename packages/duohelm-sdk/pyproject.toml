@@ -1,6 +1,6 @@
 [project]
 name = "duohelm-sdk"
-version = "0.4.1"
+version = "0.4.2"
 description = "DuoHelm 插件 SDK：插件接口、清单格式、契约检查"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -178,6 +178,7 @@ with session_for(
 | `load` | 插件状态不是 `ready`、种类不支持，或导入失败 | 不能 |
 | `protocol` | 消息超长、格式不对、调用了不允许的方法 | 不能，平台会结束子进程 |
 | `unsupported` | 调用了允许的可选方法（如 `check_connection`），但插件根本没有这个属性。属性存在但不可调用、或方法内部抛出 `NotImplementedError`，都算 `plugin_error`。可选方法要定义在类上：子进程用 `inspect.getattr_static` 判断，`__getattr__` 动态提供的方法认不出来 | 能 |
+| `lookup_failed` | 插件抛了 `LookupFailedError`（SDK 0.4.2，`lookup_securities` 查询失败，结果未知）。子进程单独报这个类型，不退化成 `plugin_error`。`data.sync` 的退市股扫描专门处理它，见 `data.md` | 能 |
 
 除 `timeout`、`crashed` 外，这些错误都不应作为 `RetryableError` 自动重试：同样的输入再跑一次，结果大概率不变。`data.sync` 把 `timeout`、`crashed` 当作可能是一时的问题（数据源暂时不可达、子进程被系统结束），转成 `RetryableError`，由任务系统按 `max_attempts` 重试；其他都直接失败。
 
@@ -204,6 +205,14 @@ with session_for(
   - 清单字段（如插件的 `kind`）不在此列：清单受 `sdk` 版本范围约束，用了新取值的插件会被判为 SDK 不兼容，而不是被当作错误
 
 ### 变更记录
+
+**SDK 0.4.2（M1）**，兼容，只新增一个异常类（#56，维护者 2026-11-27 批准）：
+
+- `LookupFailedError`（`duohelm_sdk.__all__`，继承 `Exception`）：`DataSourcePlugin.lookup_securities` 查询失败时抛它。**返回空结果仍表示“确定没有这个代码”**，抛这个异常表示“不知道”。此前接口分不清两者，数据源一时返回空会被记成“没找到”，要等重扫间隔才被重查
+- 方法签名、返回格式没有变。不抛这个异常的旧插件行为不变：抛别的异常，平台照旧按 `plugin_error` 处理，整次同步失败
+- 平台行为：隔离协议把它作为单独的错误类型（`lookup_failed`）传回，不会在子进程边界上退化成普通的 `plugin_error`。退市股扫描收到它，这批代码不写进扫描记录（不记“没找到”，也不更新查询时间），其余批次照常扫描，最后任务失败；下次同步照常重查。见 `data.md` 的“退市股扫描”
+- 用到它的插件，清单的 `sdk` 改为 `">=0.4.2,<0.5"`：0.4.1 及以前的平台没有这个类，`import` 会失败，被判为 SDK 不兼容；不改清单则要在 0.4.2 之前的平台上自己兜底导入
+- 迁移（插件仓库单独提 PR）：eltdx、xtdata 的 `lookup_securities` 里，把“连接失败、接口报错、返回结构异常”从“返回空”（或吞掉异常）改为抛 `LookupFailedError`；确认数据源没有这个代码才不返回它。不改也能运行，只是缺口依旧
 
 **SDK 0.4.1（M1）**，兼容，只新增一个可选字段：
 

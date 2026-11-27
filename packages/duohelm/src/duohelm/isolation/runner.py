@@ -56,8 +56,10 @@ FailureReason = Literal[
     "protocol",
     "contract",
     "unsupported",
+    "lookup_failed",
 ]
-"""``unsupported``：插件没有实现这个方法（只会出现在可选的方法上，如 check_connection）。"""
+"""``unsupported``：插件没有实现这个方法（只会出现在可选的方法上，如 check_connection）。
+``lookup_failed``：插件抛了 ``LookupFailedError``（SDK 0.4.2），表示查询失败、结果未知。"""
 SUPPORTED_KINDS = frozenset({"factor", "datasource"})
 
 # 子进程只继承这些环境变量。凭据、DUOHELM_* 配置、代理设置等一律不传。
@@ -564,7 +566,7 @@ class PluginSession:
 def _from_error(reply: Mapping[str, Any]) -> PluginRunError:
     kind = str(reply.get("kind", "plugin_error"))
     reason: FailureReason
-    if kind in ("memory", "load", "protocol", "plugin_error", "unsupported"):
+    if kind in ("memory", "load", "protocol", "plugin_error", "unsupported", "lookup_failed"):
         reason = cast(FailureReason, kind)
     else:
         reason = "plugin_error"

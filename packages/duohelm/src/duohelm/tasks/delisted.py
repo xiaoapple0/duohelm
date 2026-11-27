@@ -10,6 +10,9 @@
    任务失败、取消后，下次接着扫；重扫查到的转为“扫到过”，进入第 3 步
 3. 扫到过、但现在不在代码表里的代码，每次同步都重新查询，取得最新的上市、退市日期。
    之前扫到过、这次查不到的，任务失败：查不到是“不知道”，不能当成没有这只证券
+4. 插件对一批代码抛 ``LookupFailedError``（#56，SDK 0.4.2）是“查询失败”，同样是“不知道”：
+   这批代码不写进扫描记录（不记“没找到”，也不更新查询时间），其余批次照常扫描，最后任务失败。
+   下次同步照常重查。返回空结果才是“没找到”
 
 扫描完成后才返回证券列表，所以 ``data.sync`` 不会用没扫完的名单写快照。
 """
@@ -21,7 +24,7 @@ from dataclasses import dataclass
 
 import polars as pl
 
-from duohelm.isolation.runner import PluginSession
+from duohelm.isolation.runner import PluginRunError, PluginSession
 from duohelm.storage import Catalog
 from duohelm.tasks.types import TaskContext
 from duohelm_sdk.checks import check_securities
@@ -102,10 +105,14 @@ def discover_securities(
         f"到期重扫的“没找到”的代码 {len(rescan)} 个"
     )
     found: list[pl.DataFrame] = []
+    unknown: list[str] = []  # 查询失败的代码：不知道有没有，不记录
     for i, batch in enumerate(_batches(pending)):
         ctx.check_cancelled()
         progress(0.9 * i * SCAN_BATCH / max(len(pending), 1), f"扫描代码：{i * SCAN_BATCH}")
         rows = _lookup(session, batch)
+        if rows is None:
+            unknown.extend(batch)
+            continue
         hit = set(rows.get_column("symbol").to_list())
         catalog.record_scan(source, [(s, s in hit) for s in batch])
         found.append(rows)
@@ -118,6 +125,9 @@ def discover_securities(
         ctx.check_cancelled()
         progress(0.9 + 0.1 * i * SCAN_BATCH / max(len(recheck), 1), "重新查询退市证券")
         rows = _lookup(session, batch)
+        if rows is None:
+            unknown.extend(batch)
+            continue
         missing = sorted(set(batch) - set(rows.get_column("symbol").to_list()))
         if missing:
             raise ScanError(
@@ -125,6 +135,12 @@ def discover_securities(
                 "查不到是“不知道”，不能当成没有这只证券"
             )
         found.append(rows)
+
+    if unknown:
+        raise ScanError(
+            f"lookup_securities 对 {len(unknown)} 个代码查询失败，例如 {unknown[:5]}。"
+            "查询失败是“不知道”，没有记为没找到，下次同步会重新查询；这次不写快照"
+        )
 
     extra = pl.concat([pl.DataFrame(schema=SECURITIES_SCHEMA), *found])
     still_listed = extra.filter(pl.col("delist_date").is_null()).height
@@ -138,8 +154,15 @@ def discover_securities(
     return ScanResult(securities, scanned=len(fresh), rescanned=len(rescan), rechecked=len(recheck))
 
 
-def _lookup(session: PluginSession, batch: Sequence[str]) -> pl.DataFrame:
-    rows = _checked(session.call("lookup_securities", list(batch)), "lookup_securities")
+def _lookup(session: PluginSession, batch: Sequence[str]) -> pl.DataFrame | None:
+    """查询一批代码。插件报告查询失败（``LookupFailedError``）时返回 None：结果未知。"""
+    try:
+        value = session.call("lookup_securities", list(batch))
+    except PluginRunError as exc:
+        if exc.reason == "lookup_failed":
+            return None
+        raise
+    rows = _checked(value, "lookup_securities")
     extra = sorted(set(rows.get_column("symbol").to_list()) - set(batch))
     if extra:
         raise ScanError(f"lookup_securities 返回了没有查询的代码，例如 {extra[:5]}")

@@ -120,6 +120,7 @@ def test_triggers_on_trading_day_once_with_incremental_params(env: Env) -> None:
         "start": "2023-12-25",
         "end": None,
         "indexes": None,  # 用 data.sync 的默认指数
+        "rescan_days": 7.0,  # data.sync 的默认重扫间隔（#58）
     }
 
     # 同一天再检查不会重复提交（即使任务已经结束）

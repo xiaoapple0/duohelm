@@ -35,7 +35,7 @@ def make(tmp_path: Path, *, dev: bool = False) -> tuple[TestClient, Worker]:
 def test_task_types(tmp_path: Path) -> None:
     client, _ = make(tmp_path)
     names = [t["name"] for t in client.get("/api/task-types").json()]
-    assert names == ["data.sync", "plugins.scan"]
+    assert names == ["data.cross_check", "data.sync", "plugins.scan"]
 
 
 def test_data_sync_params_are_validated(tmp_path: Path) -> None:

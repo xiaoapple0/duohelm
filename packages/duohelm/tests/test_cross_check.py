@@ -80,14 +80,20 @@ class Source:
         if bad & set(symbols):
             raise RuntimeError("bars 出错")
         rows = [
-            (day(d), s, o, h, l, c, v, None if v is None else v * c)
+            (day(d), s, o, h, l, c, v, None if v is None or c is None else v * c)
             for s, d, o, h, l, c, v in D["bars"]
             if s in symbols and start <= day(d) <= end
         ]
+        if D.get("bars_extra"):
+            rows.append((date(2024, 1, 2), "999999.SH", 1.0, 1.0, 1.0, 1.0, 1.0, 1.0))
+        if D.get("bars_outside"):
+            rows.append((date(2024, 2, 1), symbols[0], 1.0, 1.0, 1.0, 1.0, 1.0, 1.0))
         return pl.DataFrame(rows, schema=BARS_SCHEMA, orient="row")
 
     def adj_factors(self, symbols, start, end):
         rows = [(day(d), s, f) for s, d, f in D.get("factors", []) if s in symbols]
+        if D.get("factor_bad"):
+            rows.append((date(2024, 1, 2), symbols[0], -1.0))
         return pl.DataFrame(rows, schema=ADJ_FACTORS_SCHEMA, orient="row")
 
 
@@ -380,3 +386,89 @@ def test_missing_plugin_fails_the_task(settings: Settings) -> None:
 
 def test_registered_as_builtin(settings: Settings) -> None:
     assert "data.cross_check" in {t.name for t in builtin_task_types(settings)}
+
+
+# ---- 空值、NaN ----
+
+
+def set_close(data: dict[str, Any], symbol: str, day: str, value: float | None) -> None:
+    for r in data["bars"]:
+        if r[0] == symbol and r[1] == day:
+            r[5] = value
+
+
+@pytest.mark.parametrize("empty", [None, float("nan")], ids=["null", "nan"])
+def test_empty_field_is_unknown_not_consistent(settings: Settings, empty: float | None) -> None:
+    """一边的收盘价为空（或 NaN）：这个字段不比较，计入 unknown_fields，这一行不算一致，
+    也不算 bar_mismatch。"""
+    a, b = base_data(), base_data()
+    set_close(b, "600000.SH", "2024-01-05", empty)
+    result = check(settings, a, b)
+    assert result.status == "compared"
+    assert result.unknown_fields == {"close": 1}
+    assert result.counts == {}
+    assert result.bars_compared == 3 * len(DAYS)
+    assert result.bars_consistent == 3 * len(DAYS) - 1
+    # 结果能序列化成合法 JSON：没有 NaN 字面量
+    task_json = result.model_dump_json()
+    assert "NaN" not in task_json
+    json.loads(task_json, parse_constant=_reject_constant)
+
+
+def _reject_constant(name: str) -> None:
+    raise AssertionError(f"JSON 里出现了 {name}")
+
+
+def test_nan_does_not_hide_a_real_difference_elsewhere(settings: Settings) -> None:
+    a, b = base_data(), base_data()
+    set_close(a, "600000.SH", "2024-01-05", float("nan"))
+    set_close(b, "600000.SH", "2024-01-08", 99.0)
+    result = check(settings, a, b)
+    assert result.unknown_fields == {"close": 1}
+    assert result.counts == {"bar_mismatch": 1, "bar_mismatch.close": 1}
+    assert result.bars_consistent == 3 * len(DAYS) - 2
+
+
+# ---- 批次校验失败 ----
+
+
+@pytest.mark.parametrize("flag", ["bars_extra", "bars_outside", "factor_bad"])
+def test_batch_validation_failure_is_unknown(settings: Settings, flag: str) -> None:
+    """插件返回了没请求的证券、区间外的日期、不合格的复权因子：这一批证券都记为未知。"""
+    a, b = base_data(), base_data()
+    b[flag] = True
+    result = check(settings, a, b)
+    assert result.status == "unknown" and not result.complete
+    assert result.counts == {} and result.symbols_compared == 0
+    assert result.unknown_symbols_total == 3
+    assert all(u.unknown_in == ["b"] for u in result.unknown_symbols)
+    assert result.sources["b"].batch_errors == 1
+
+
+# ---- 样例的分配和顺序 ----
+
+
+def test_examples_are_fair_across_fields_and_sorted(settings: Settings) -> None:
+    a, b = base_data(), base_data()
+    for r in b["bars"]:
+        r[2] *= 1.01  # open 全部不同
+        r[5] *= 1.01  # close 全部不同
+    result = check(settings, a, b, max_examples=2)
+    by_field: dict[str | None, int] = {}
+    for d in result.examples:
+        by_field[d.field] = by_field.get(d.field, 0) + 1
+    assert by_field == {"open": 2, "close": 2}  # open 没有占满名额
+    keys = [(d.kind, d.symbol, d.date, d.field) for d in result.examples]
+    assert keys == sorted(keys, key=lambda k: (k[0], k[1], k[2], k[3] or ""))
+    assert result.examples_truncated
+
+
+def test_empty_intersection_is_unknown(settings: Settings) -> None:
+    """两个数据源都正常，但证券列表的交集为空：没有比较任何证券，不能说“一致”。"""
+    a, b = base_data(), base_data()
+    a["securities"] = [SECURITIES[0]]
+    b["securities"] = [SECURITIES[1], SECURITIES[2]]
+    result = check(settings, a, b)
+    assert result.sources["a"].ok and result.sources["b"].ok
+    assert result.status == "unknown" and not result.complete
+    assert result.symbols_requested == 0 and result.only_listed_in_a_total == 1

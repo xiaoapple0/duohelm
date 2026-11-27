@@ -276,7 +276,7 @@ data/
 
 - **日线**：和 `data.sync` 的入库口径一致，两边都丢弃成交量为 0 的行（停牌占位）。按 (证券, 日期) 对齐：
   - 只在一边出现的日期：`only_in_a`、`only_in_b`（漏数据、日期错位）
-  - 两边都有的日期，开、高、低、收、成交量各自比较，超过阈值记 `bar_mismatch`（`field` 指明字段）。某个字段至少有一边为空时不比较，次数记进 `unknown_fields`，不当成相同也不当成不同
+  - 两边都有的日期，开、高、低、收、成交量各自比较，超过阈值记 `bar_mismatch`（`field` 指明字段）。某个字段至少有一边为空（NaN 按空处理）时不比较，次数记进 `unknown_fields`，不当成相同也不当成不同；这样的行不计入 `bars_consistent`（两边五个字段都知道、都在阈值内的行数）
   - 成交量按 SDK 契约比较，契约规定单位是股，**不做单位换算**。某个证券两边都有成交量的行（至少 5 行）里，90% 以上 a/b 接近 100 或 0.01（误差 2% 内），判定有一边的单位不是股（例如手），记一条 `volume_unit_mismatch`（整个证券一条，`note` 写明比值），该证券不再逐日列成交量差异。这是插件违反契约，不是数据差异，参见 xiaoapple0/duohelm-plugins#3（eltdx 指数成交量的单位）
 - **复权因子**：总是从 1990-12-19 请求到 `end`（同 `data.sync`）。因子是累计值的阶梯函数，在两边所有除权日上比较各自生效的因子（第一行之前为 1.0），超过阈值记 `factor_mismatch`；`note` 说明这一天是否只有一边有除权记录。除权日早于 `start` 的差异也会列出，因为累计值会带进区间
 - 不比较成交额、证券列表和退市日（退市日的近似值见已知缺口）
@@ -284,10 +284,10 @@ data/
 **读取失败是“未知”，不是“没有差异”**
 
 - 数据源整体不可用（连接检查没通过、能力检查失败、没传 `symbols` 时证券列表失败、插件启动失败）：记进 `sources`（`ok` 为 False 和原因）；某一批证券的日线或复权因子读取失败、返回格式不合格、含没请求的证券或区间外的日期：这一批的证券在这个数据源上是未知，记进 `unknown_symbols`（样例加总数 `unknown_symbols_total`），不参与比较，也不会出现在差异里
-- `status`：`compared`（所有证券都比较了）、`partial`（有证券未知）、`unknown`（一个证券也没比较成，或没传 `symbols` 又无法确定证券范围）。只有 `complete` 为 True 才能说“核对完成”；`partial` 和 `unknown` 里没列出的差异不代表没有差异
+- `status`：`compared`（所有证券都比较了）、`partial`（有证券未知）、`unknown`（一个证券也没比较成，或没传 `symbols` 又无法确定证券范围）。**两个数据源都正常、只是证券列表的交集为空时，`status` 也是 `unknown`**（没有比较任何证券，不能说“一致”）。只有 `complete` 为 True 才能说“核对完成”；`partial` 和 `unknown` 里没列出的差异不代表没有差异
 - 取消照常取消；插件报错、超时都记为未知，任务本身不自动重试（`max_attempts` 为 1）。参数不合格、插件不存在或不是行情源、`end` 未收盘，任务失败
 
-**结果的大小**：每个 kind 最多 `max_examples` 条样例（按证券、日期排序），`counts` 记每类差异的总数（`bar_mismatch` 另按字段拆分，如 `bar_mismatch.close`），`top_symbols` 是差异最多的证券，`symbols_with_differences` 是有差异的证券总数；`examples_truncated` 为 True 表示样例被截断。
+**结果的大小**：样例名额按 kind 分配，`bar_mismatch` 再按字段分配（开、高、低、收、成交量各自最多 `max_examples` 条，开盘价的差异占不满别的字段的名额）；每个名额里保留最先遇到的样例（证券按传入顺序，不传 `symbols` 时按代码排序，再按日期），输出时统一按 kind、证券、日期、字段排序。`counts` 记每类差异的总数（`bar_mismatch` 另按字段拆分，如 `bar_mismatch.close`），`top_symbols` 是差异最多的证券，`symbols_with_differences` 是有差异的证券总数；`examples_truncated` 为 True 表示样例被截断。
 
 ## 黄金数据集
 

@@ -14,13 +14,12 @@
 
 from __future__ import annotations
 
-import statistics
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Literal, Self
+from typing import Literal, Self
 
 import polars as pl
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -170,6 +169,9 @@ class CrossCheckResult(BaseModel):
     only_listed_in_b_total: int = 0
     bars_compared: int = 0
     """两边都有的 (证券, 日期) 行数。"""
+    bars_consistent: int = 0
+    """其中一致的行数：开高低收成交量两边都不为空（NaN 按空处理）、都在阈值内，且证券没有成交量
+    单位差异。有空字段的行不算一致，也不算差异，见 ``unknown_fields``。"""
     unknown_fields: dict[str, int] = Field(default_factory=lambda: {})
     """两边都有的行里，某个字段至少有一边为空、没有比较的次数，按字段。"""
     counts: dict[str, int] = Field(default_factory=lambda: {})
@@ -269,6 +271,7 @@ class _Checker:
         self.unknown: dict[str, tuple[set[str], str]] = {}
         self.unknown_fields: Counter[str] = Counter()
         self.bars_compared = 0
+        self.bars_consistent = 0
         self.compared = 0
 
     # ---- 错误
@@ -395,11 +398,18 @@ class _Checker:
         a = bars_a.filter(pl.col("volume").is_null() | (pl.col("volume") != 0.0))
         b = bars_b.filter(pl.col("volume").is_null() | (pl.col("volume") != 0.0))
         fields = [*PRICE_FIELDS, "volume"]
+        # NaN 按空值处理（“不知道”）：NaN 比较永远为假，不转成空会被当成没有差异
         a = a.select(
-            "symbol", "date", pl.lit(True).alias("_a"), *[pl.col(f).alias(f"{f}_a") for f in fields]
+            "symbol",
+            "date",
+            pl.lit(True).alias("_a"),
+            *[pl.col(f).fill_nan(None).alias(f"{f}_a") for f in fields],
         )
         b = b.select(
-            "symbol", "date", pl.lit(True).alias("_b"), *[pl.col(f).alias(f"{f}_b") for f in fields]
+            "symbol",
+            "date",
+            pl.lit(True).alias("_b"),
+            *[pl.col(f).fill_nan(None).alias(f"{f}_b") for f in fields],
         )
         joined = a.join(b, on=["symbol", "date"], how="full", coalesce=True).sort("symbol", "date")
 
@@ -413,14 +423,18 @@ class _Checker:
         both = joined.filter(pl.col("_a").is_not_null() & pl.col("_b").is_not_null())
         self.bars_compared += both.height
         unit_symbols = self._unit_mismatches(both)
+        consistent = pl.lit(True)
         for f in fields:
             va, vb = pl.col(f"{f}_a"), pl.col(f"{f}_b")
             self.unknown_fields[f] += both.filter(va.is_null() | vb.is_null()).height
             tol = self.p.volume_tolerance if f == "volume" else self.p.price_tolerance
             rel = _rel(va, vb)
             bad = both.filter(va.is_not_null() & vb.is_not_null() & (rel > tol))
+            ok = va.is_not_null() & vb.is_not_null() & (rel <= tol)
             if f == "volume":
                 bad = bad.filter(~pl.col("symbol").is_in(list(unit_symbols)))
+                ok = ok & ~pl.col("symbol").is_in(list(unit_symbols))
+            consistent = consistent & ok
             self._add(
                 "bar_mismatch",
                 bad.select(
@@ -433,6 +447,8 @@ class _Checker:
                 ),
                 field=f,
             )
+        # 一致的行：五个字段两边都知道、都在阈值内。有空值的行不算一致
+        self.bars_consistent += both.filter(consistent).height
 
     def _unit_mismatches(self, both: pl.DataFrame) -> set[str]:
         """成交量单位疑似不同（几乎恒为 100 倍或 1/100）的证券；每个证券记一条差异。"""
@@ -442,47 +458,47 @@ class _Checker:
             & (pl.col("volume_a") > 0)
             & (pl.col("volume_b") > 0)
         )
-        found: set[str] = set()
-        rows: list[dict[str, Any]] = []
-        for (symbol,), group in valid.group_by("symbol", maintain_order=True):
-            va = group.get_column("volume_a").to_list()
-            vb = group.get_column("volume_b").to_list()
-            if len(va) < UNIT_MIN_ROWS:
-                continue
-            ratios = [x / y for x, y in zip(va, vb, strict=True)]
-            for target in UNIT_RATIOS:
-                near = sum(abs(r / target - 1) <= UNIT_RATIO_TOLERANCE for r in ratios)
-                if near / len(ratios) >= UNIT_MIN_SHARE:
-                    median_ratio = statistics.median(ratios)
-                    found.add(str(symbol))
-                    rows.append(
-                        {
-                            "symbol": str(symbol),
-                            "date": None,
-                            "field": "volume",
-                            "a": statistics.median(va),
-                            "b": statistics.median(vb),
-                            "rel_diff": None,
-                            "note": f"成交量单位疑似不同：a/b 的中位数 {median_ratio:.4g}，"
-                            f"{near}/{len(ratios)} 行接近 {target:g}（契约规定单位是股）",
-                        }
-                    )
-                    break
-        if rows:
-            frame = pl.DataFrame(
-                rows,
-                schema={
-                    "symbol": pl.String,
-                    "date": pl.Date,
-                    "field": pl.String,
-                    "a": pl.Float64,
-                    "b": pl.Float64,
-                    "rel_diff": pl.Float64,
-                    "note": pl.String,
-                },
-            )
-            self._add("volume_unit_mismatch", frame)
-        return found
+        r = pl.col("volume_a") / pl.col("volume_b")
+        agg = [
+            pl.len().alias("n"),
+            r.median().alias("ratio"),
+            pl.col("volume_a").median().alias("a"),
+            pl.col("volume_b").median().alias("b"),
+        ]
+        for i, target in enumerate(UNIT_RATIOS):
+            agg.append(((r / target - 1).abs() <= UNIT_RATIO_TOLERANCE).sum().alias(f"near{i}"))
+        stats = valid.group_by("symbol").agg(agg).filter(pl.col("n") >= UNIT_MIN_ROWS)
+        # 先匹配的比值优先（100 在前）
+        target = pl.lit(None, dtype=pl.Float64)
+        near = pl.lit(0, dtype=pl.UInt32)
+        for i, t in reversed(list(enumerate(UNIT_RATIOS))):
+            hit = pl.col(f"near{i}") >= UNIT_MIN_SHARE * pl.col("n")
+            target = pl.when(hit).then(pl.lit(t)).otherwise(target)
+            near = pl.when(hit).then(pl.col(f"near{i}")).otherwise(near)
+        flagged = (
+            stats.with_columns(target.alias("target"), near.alias("near_rows"))
+            .filter(pl.col("target").is_not_null())
+            .sort("symbol")
+        )
+        if flagged.is_empty():
+            return set()
+        frame = flagged.select(
+            "symbol",
+            pl.lit(None, dtype=pl.Date).alias("date"),
+            pl.lit("volume").alias("field"),
+            "a",
+            "b",
+            pl.lit(None, dtype=pl.Float64).alias("rel_diff"),
+            pl.format(
+                "成交量单位疑似不同：a/b 的中位数 {}，{}/{} 行接近 {}（契约规定单位是股）",
+                pl.col("ratio").round_sig_figs(4),
+                pl.col("near_rows"),
+                pl.col("n"),
+                pl.col("target"),
+            ).alias("note"),
+        )
+        self._add("volume_unit_mismatch", frame)
+        return set(frame.get_column("symbol").to_list())
 
     def _compare_factors(self, fac_a: pl.DataFrame, fac_b: pl.DataFrame) -> None:
         """复权因子是阶梯函数：在两边所有除权日上比较各自生效的因子（第一行之前为 1.0）。"""
@@ -540,7 +556,8 @@ class _Checker:
             self.counts[f"{kind}.{field}"] += rows.height
         for symbol, n in rows.get_column("symbol").value_counts().iter_rows():
             self.per_symbol[symbol] += n
-        kept = self.examples.setdefault(kind, [])
+        # 名额按 kind 分配；bar_mismatch 再按字段分配，免得开盘价的差异占满名额
+        kept = self.examples.setdefault(f"{kind}.{field}" if field else kind, [])
         room = self.p.max_examples - len(kept)
         if room > 0:
             for row in rows.head(room).iter_rows(named=True):
@@ -559,7 +576,10 @@ class _Checker:
             status = "compared"
         if p.symbols is None and not symbols:
             status = "unknown"  # 没有确定要核对哪些证券
-        examples = [d for kind in self.examples.values() for d in kind]
+        examples = sorted(
+            (d for kept in self.examples.values() for d in kept),
+            key=lambda d: (d.kind, d.symbol, d.date or date.min, d.field or ""),
+        )
         truncated = any(self.counts[k] > len(v) for k, v in self.examples.items())
         top = self.per_symbol.most_common(p.max_examples)
         self.ctx.log(
@@ -595,6 +615,7 @@ class _Checker:
             only_listed_in_a_total=len(only_a),
             only_listed_in_b_total=len(only_b),
             bars_compared=self.bars_compared,
+            bars_consistent=self.bars_consistent,
             unknown_fields={k: v for k, v in self.unknown_fields.items() if v},
             counts=dict(self.counts),
             symbols_with_differences=len(self.per_symbol),

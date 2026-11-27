@@ -29,6 +29,7 @@ from duohelm.settings import Settings
 from duohelm.storage import DataStore
 from duohelm.storage.reader import (
     DataNotFoundError,
+    DataReadError,
     InvalidQueryError,
     MarketReader,
 )
@@ -486,6 +487,8 @@ def test_coverage_missing_days(reader: MarketReader, built: Built) -> None:
         "symbol": "600000.SH",
         "name": "浦发银行",
         "kind": "stock",
+        "exchange": "SH",
+        "delist_date": None,
         "first_date": d(2),
         "last_date": d(19),
         "bar_count": 12,
@@ -528,6 +531,145 @@ def test_coverage_api_paging_kind_and_snapshot(get: Get, built: Built) -> None:
     assert idx["total"] == 1 and idx["items"][0]["symbol"] == "000300.SH"
     sh = next(i for i in body["items"] if i["symbol"] == "600000.SH")
     assert sh["missing_days"] == 2 and sh["expected_days"] == 14
+
+
+def test_coverage_rows_have_exchange_and_delist_date(reader: MarketReader, built: Built) -> None:
+    rows = {r["symbol"]: r for r in reader.coverage(snapshot=built.snap1).items.to_dicts()}
+    assert [(rows[s]["exchange"], rows[s]["delist_date"]) for s in rows] == [
+        ("SZ", None),
+        ("SH", None),
+        ("SH", None),
+        ("SH", d(12)),  # 600001.SH 退市股
+        ("BJ", None),
+    ]
+
+
+def add_unlisted_symbol_bars(store: DataStore) -> str:
+    """日线里有、证券列表里没有的代码。"""
+    with store.transaction() as tx:
+        tx.write("bars_1d", bars_frame(bar_rows("999999.SH", [2, 3, 5])))
+    assert tx.snapshot_id is not None
+    return tx.snapshot_id
+
+
+def test_coverage_symbol_not_in_securities_is_unknown(reader: MarketReader, built: Built) -> None:
+    snap = add_unlisted_symbol_bars(built.store)
+    rows = {r["symbol"]: r for r in reader.coverage(snapshot=snap).items.to_dicts()}
+    ghost = rows["999999.SH"]
+    # 未知就是 null，不按代码前缀猜成 SH
+    assert ghost["exchange"] is None and ghost["delist_date"] is None and ghost["name"] is None
+    assert ghost["bar_count"] == 3
+    summary = reader.coverage_summary(snapshot=snap, today=d(20))
+    unknown = [g for g in summary.groups.to_dicts() if g["status"] is None]
+    assert len(unknown) == 1
+    assert (unknown[0]["exchange"], unknown[0]["kind"], unknown[0]["securities"]) == (None, None, 1)
+    assert summary.total == 7  # 当前快照的 6 只加上这个代码
+
+
+def test_coverage_summary_groups(reader: MarketReader, built: Built) -> None:
+    summary = reader.coverage_summary(snapshot=built.snap1, today=d(20))
+    assert (summary.snapshot, summary.as_of, summary.total) == (built.snap1, d(20), 5)
+    groups = {(g["exchange"], g["kind"], g["status"]): g for g in summary.groups.to_dicts()}
+    assert list(groups) == [  # 按交易所、种类、状态排序
+        ("BJ", "stock", "listed"),
+        ("SH", "index", "listed"),
+        ("SH", "stock", "delisted"),
+        ("SH", "stock", "listed"),
+        ("SZ", "stock", "listed"),
+    ]
+    assert groups[("SH", "stock", "delisted")] == {
+        "exchange": "SH",
+        "kind": "stock",
+        "status": "delisted",
+        "securities": 1,
+        "with_bars": 1,
+        "no_bars": 0,
+        "bar_count": 4,
+        "with_missing": 1,
+        "missing_days": 1,
+        "off_calendar_bars": 0,
+    }
+    sh = groups[("SH", "stock", "listed")]
+    assert (sh["securities"], sh["bar_count"], sh["missing_days"]) == (1, 12, 2)
+    # 没有任何日线的北交所股票：算作没有日线，不计缺失
+    bj = groups[("BJ", "stock", "listed")]
+    assert (bj["with_bars"], bj["no_bars"], bj["with_missing"], bj["missing_days"]) == (0, 1, 0, 0)
+    assert groups[("SH", "index", "listed")]["off_calendar_bars"] == 1
+
+
+def test_coverage_summary_status_depends_on_as_of(reader: MarketReader, built: Built) -> None:
+    """退市日 1 月 12 日：当天及之后算退市，之前仍在市。"""
+
+    def status_at(today: date) -> str | None:
+        groups = reader.coverage_summary(snapshot=built.snap1, today=today).groups
+        sh = groups.filter((pl.col("exchange") == "SH") & (pl.col("kind") == "stock"))
+        return ",".join(sorted(sh.get_column("status").to_list()))
+
+    assert status_at(d(11)) == "listed"
+    assert status_at(d(12)) == "delisted,listed"
+
+
+def test_coverage_summary_api(get: Get, built: Built) -> None:
+    body = get("/api/data/coverage/summary").json()
+    assert body["snapshot"] == built.snap2 and body["total"] == 6
+    assert sum(g["securities"] for g in body["groups"]) == 6
+    assert {g["exchange"] for g in body["groups"]} == {"BJ", "SH", "SZ"}
+    assert sum(g["securities"] for g in body["groups"] if g["status"] == "delisted") == 1
+    old = get("/api/data/coverage/summary", snapshot=built.snap1).json()
+    assert old["total"] == 5
+    assert get("/api/data/coverage/summary", snapshot="xyz").status_code == 422
+
+
+def test_coverage_summary_needs_snapshot(get_empty: Get) -> None:
+    r = get_empty("/api/data/coverage/summary")
+    assert r.status_code == 404 and "快照" in r.json()["detail"]
+
+
+def break_securities(built: Built) -> None:
+    for path in (built.store.files_dir / "securities").rglob("*.parquet"):
+        path.unlink()
+
+
+def test_securities_read_failure_is_an_error_not_unknown(
+    reader: MarketReader, get: Get, built: Built
+) -> None:
+    break_securities(built)
+    with pytest.raises(DataReadError, match="证券列表"):
+        reader.coverage()
+    for path in ("/api/data/coverage", "/api/data/coverage/summary"):
+        r = get(path)
+        assert r.status_code == 500 and "证券列表" in r.json()["detail"], path
+
+
+def test_failed_scan_is_not_cached(reader: MarketReader, built: Built) -> None:
+    files = {p: p.read_bytes() for p in (built.store.files_dir / "securities").rglob("*.parquet")}
+    break_securities(built)
+    with pytest.raises(DataReadError):
+        reader.coverage()
+    for p, content in files.items():
+        p.write_bytes(content)
+    assert reader.coverage().total == 6
+
+
+def test_coverage_scans_bars_once_per_snapshot(
+    reader: MarketReader, built: Built, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scans: list[str | None] = []
+    real_read = built.store.read
+
+    def counting(dataset: str, **kw: Any) -> pl.DataFrame:
+        if dataset == "bars_1d":
+            scans.append(kw.get("snapshot"))
+        return real_read(dataset, **kw)
+
+    monkeypatch.setattr(built.store, "read", counting)
+    reader.coverage(snapshot=built.snap1, limit=2)
+    reader.coverage(snapshot=built.snap1, limit=2, offset=2)
+    reader.coverage(snapshot=built.snap1, kind="index")
+    reader.coverage_summary(snapshot=built.snap1)
+    assert scans == [built.snap1]
+    reader.coverage_summary()  # 另一个快照：再扫一次
+    assert scans == [built.snap1, built.snap2]
 
 
 def test_coverage_needs_calendar(home: Settings, get_empty: Get) -> None:

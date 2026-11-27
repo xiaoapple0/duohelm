@@ -13,7 +13,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query
@@ -28,6 +28,7 @@ from duohelm.storage import (
 from duohelm.storage.reader import (
     AdjustMode,
     DataNotFoundError,
+    DataReadError,
     InvalidQueryError,
     MarketReader,
 )
@@ -109,6 +110,10 @@ class CoverageRowOut(BaseModel):
     symbol: str
     name: str | None
     kind: str | None
+    exchange: str | None
+    """证券列表里的交易所；null 表示未知（证券列表里没有这个代码）。"""
+    delist_date: date | None
+    """证券列表里的退市日；null：没有退市日，或证券列表里没有这个代码（exchange 也是 null）。"""
     first_date: date | None
     last_date: date | None
     bar_count: int
@@ -122,6 +127,28 @@ class CoverageOut(BaseModel):
     snapshot: str
     total: int
     items: list[CoverageRowOut]
+
+
+class CoverageGroupOut(BaseModel):
+    exchange: str | None
+    kind: str | None
+    status: Literal["listed", "delisted"] | None
+    """null 表示未知：证券列表里没有这个代码。"""
+    securities: int
+    with_bars: int
+    no_bars: int
+    bar_count: int
+    with_missing: int
+    missing_days: int
+    off_calendar_bars: int
+
+
+class CoverageSummaryOut(BaseModel):
+    snapshot: str
+    as_of: date
+    """判定在市/退市用的北京日期。"""
+    total: int
+    groups: list[CoverageGroupOut]
 
 
 def read_quality_report(data: DataStore, snapshot_id: str) -> dict[str, Any] | None:
@@ -163,6 +190,8 @@ def _mapped() -> Generator[None]:
         raise HTTPException(404, str(e)) from None
     except InvalidQueryError as e:
         raise HTTPException(422, str(e)) from None
+    except DataReadError as e:
+        raise HTTPException(500, str(e)) from None
 
 
 def data_router(data_dir: Path) -> APIRouter:
@@ -276,6 +305,17 @@ def data_router(data_dir: Path) -> APIRouter:
             snapshot=page.snapshot,
             total=page.total,
             items=[CoverageRowOut(**r) for r in _rows(page.items)],
+        )
+
+    @router.get("/coverage/summary", response_model=CoverageSummaryOut)
+    def coverage_summary(*, snapshot: SnapshotParam = None) -> CoverageSummaryOut:
+        with _mapped():
+            result = reader().coverage_summary(snapshot=snapshot)
+        return CoverageSummaryOut(
+            snapshot=result.snapshot,
+            as_of=result.as_of,
+            total=result.total,
+            groups=[CoverageGroupOut(**r) for r in _rows(result.groups)],
         )
 
     return router

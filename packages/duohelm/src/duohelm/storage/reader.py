@@ -12,9 +12,10 @@
 from __future__ import annotations
 
 import re
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
 import polars as pl
@@ -28,6 +29,22 @@ ADJUST_MODES: tuple[AdjustMode, ...] = ("none", "hfq", "qfq")
 CALENDAR_MARKET = "CN"
 
 _SNAPSHOT_ID = re.compile(r"[0-9a-f]{64}")
+_SHANGHAI = timezone(timedelta(hours=8))
+"""北京时间，固定偏移（1991 年以后没有夏令时），不依赖 tzdata 和本机时区。"""
+_COVERAGE_CACHE_SIZE = 2
+_COVERAGE_COLUMNS = (
+    "symbol",
+    "name",
+    "kind",
+    "exchange",
+    "delist_date",
+    "first_date",
+    "last_date",
+    "bar_count",
+    "expected_days",
+    "missing_days",
+    "off_calendar_bars",
+)
 
 
 class DataNotFoundError(LookupError):
@@ -36,6 +53,10 @@ class DataNotFoundError(LookupError):
 
 class InvalidQueryError(ValueError):
     """查询参数不合法。"""
+
+
+class DataReadError(RuntimeError):
+    """数据存在但读取失败（文件缺失、损坏）。不能用空结果代替。"""
 
 
 @dataclass(frozen=True)
@@ -68,9 +89,20 @@ class CoveragePage:
     items: pl.DataFrame
 
 
+@dataclass(frozen=True)
+class CoverageSummary:
+    snapshot: str
+    as_of: date
+    total: int
+    groups: pl.DataFrame
+
+
 class MarketReader:
     def __init__(self, store: DataStore) -> None:
         self._store = store
+        # 快照 id -> 每只证券的覆盖统计（扫描 bars_1d 的结果）；快照不可变，不会过期
+        self._coverage_cache: dict[str, pl.DataFrame] = {}
+        self._coverage_lock = threading.Lock()
 
     # ---- 快照 ----
 
@@ -174,12 +206,68 @@ class MarketReader:
     ) -> CoveragePage:
         """每只证券的首末日期、日线根数和按 CN 交易日历缺失的天数。
 
-        列：symbol、name、kind、first_date、last_date、bar_count、expected_days、
-        missing_days、off_calendar_bars。没有日线的证券 bar_count 为 0，其余为 null。
-        停牌日在库里没有行，所以也算缺失。
+        列：symbol、name、kind、exchange、delist_date、first_date、last_date、bar_count、
+        expected_days、missing_days、off_calendar_bars。没有日线的证券 bar_count 为 0，其余为
+        null。停牌日在库里没有行，所以也算缺失。证券列表里没有的代码，name、kind、exchange、
+        delist_date 为 null（未知）。证券列表读取失败抛 :class:`DataReadError`。
         """
         _check_page(limit, offset)
         snap, _ = self._open(snapshot, "securities", "bars_1d", "calendar")
+        merged = self._coverage_stats(snap)
+        if kind is not None:
+            merged = merged.filter(pl.col("kind") == kind)
+        return CoveragePage(
+            snap, merged.height, merged.select(_COVERAGE_COLUMNS).slice(offset, limit)
+        )
+
+    def coverage_summary(
+        self, *, snapshot: str | None = None, today: date | None = None
+    ) -> CoverageSummary:
+        """按交易所、种类、在市/退市分组的数量和覆盖统计。
+
+        在市/退市（status）：证券列表里没有退市日或退市日晚于 ``today`` 为 listed，不晚于
+        ``today`` 为 delisted；证券列表里没有这个代码时为 null（未知）。``today`` 默认是北京
+        日期。交易所、种类为 null 的单独成组。
+        """
+        snap, _ = self._open(snapshot, "securities", "bars_1d", "calendar")
+        as_of = today or datetime.now(_SHANGHAI).date()
+        stats = self._coverage_stats(snap)
+        status = (
+            pl.when(~pl.col("_in_securities"))
+            .then(None)
+            .when(pl.col("delist_date") <= as_of)
+            .then(pl.lit("delisted"))
+            .otherwise(pl.lit("listed"))
+            .alias("status")
+        )
+        groups = (
+            stats.with_columns(status)
+            .group_by("exchange", "kind", "status")
+            .agg(
+                pl.len().cast(pl.Int64).alias("securities"),
+                (pl.col("bar_count") > 0).sum().cast(pl.Int64).alias("with_bars"),
+                (pl.col("bar_count") == 0).sum().cast(pl.Int64).alias("no_bars"),
+                pl.col("bar_count").sum().cast(pl.Int64),
+                (pl.col("missing_days") > 0).sum().cast(pl.Int64).alias("with_missing"),
+                pl.col("missing_days").sum().cast(pl.Int64),
+                pl.col("off_calendar_bars").sum().cast(pl.Int64),
+            )
+            .sort("exchange", "kind", "status", nulls_last=True)
+        )
+        return CoverageSummary(snap, as_of, stats.height, groups)
+
+    def _coverage_stats(self, snap: str) -> pl.DataFrame:
+        """快照里每只证券的覆盖统计，按代码排序。按快照 id 缓存，同一快照只扫描一次 bars_1d。"""
+        with self._coverage_lock:  # 并发的第一批请求排队等同一次扫描
+            cached = self._coverage_cache.pop(snap, None)
+            if cached is None:
+                cached = self._scan_coverage(snap)
+            self._coverage_cache[snap] = cached  # 重新插入：最近用到的排在最后
+            while len(self._coverage_cache) > _COVERAGE_CACHE_SIZE:
+                del self._coverage_cache[next(iter(self._coverage_cache))]
+            return cached
+
+    def _scan_coverage(self, snap: str) -> pl.DataFrame:
         calendar = (
             self._store.read("calendar", snapshot=snap, columns=["market", "date"])
             .filter(pl.col("market") == CALENDAR_MARKET)
@@ -188,9 +276,16 @@ class MarketReader:
         )
         if calendar.len() == 0:
             raise DataNotFoundError(f"快照 {snap} 里没有 {CALENDAR_MARKET} 交易日历")
-        securities = self._store.read(
-            "securities", snapshot=snap, columns=["symbol", "name", "kind"]
-        )
+        try:
+            securities = self._store.read(
+                "securities",
+                snapshot=snap,
+                columns=["symbol", "name", "kind", "exchange", "delist_date"],
+            )
+        except Exception as e:
+            # 读取失败是“未知”，不能当成交易所、退市日为空而继续
+            raise DataReadError(f"读取快照 {snap} 的证券列表失败：{e}") from e
+        securities = securities.with_columns(pl.lit(True).alias("_in_securities"))
         bars = self._store.read("bars_1d", snapshot=snap, columns=["symbol", "date"])
 
         stats = bars.group_by("symbol").agg(
@@ -211,25 +306,15 @@ class MarketReader:
             (pl.col("expected_days") - pl.col("_on_calendar")).alias("missing_days"),
             (pl.col("bar_count") - pl.col("_on_calendar")).alias("off_calendar_bars"),
         )
-        merged = (
+        return (
             securities.join(stats, on="symbol", how="full", coalesce=True)
-            .with_columns(pl.col("bar_count").fill_null(0))
-            .select(
-                "symbol",
-                "name",
-                "kind",
-                "first_date",
-                "last_date",
-                "bar_count",
-                "expected_days",
-                "missing_days",
-                "off_calendar_bars",
+            .with_columns(
+                pl.col("bar_count").fill_null(0),
+                pl.col("_in_securities").fill_null(False),
             )
+            .select(*_COVERAGE_COLUMNS, "_in_securities")
             .sort("symbol")
         )
-        if kind is not None:
-            merged = merged.filter(pl.col("kind") == kind)
-        return CoveragePage(snap, merged.height, merged.slice(offset, limit))
 
     # ---- 内部 ----
 

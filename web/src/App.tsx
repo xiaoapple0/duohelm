@@ -1,6 +1,7 @@
 import {
   ApiOutlined,
   AppstoreOutlined,
+  BarChartOutlined,
   DashboardOutlined,
   ExperimentOutlined,
   FunctionOutlined,
@@ -14,6 +15,7 @@ import { Layout, Menu, Typography } from "antd";
 import type { ReactNode } from "react";
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
+import KlinePage from "./pages/kline/KlinePage";
 import OverviewPage from "./pages/OverviewPage";
 import PlaceholderPage from "./pages/PlaceholderPage";
 import PluginsPage from "./pages/PluginsPage";
@@ -37,7 +39,7 @@ const NAV: NavItem[] = [
       <PlaceholderPage
         title="行情管理"
         milestone="M1"
-        description="配置数据源、同步行情、查看数据覆盖和质量、K 线查看。"
+        description="配置数据源、同步行情、查看数据覆盖和质量。K 线查看已是独立页面（/kline）。"
       />
     ),
   },
@@ -102,6 +104,7 @@ const NAV: NavItem[] = [
       />
     ),
   },
+  { path: "/kline", label: "K 线查看", icon: <BarChartOutlined />, element: <KlinePage /> },
   { path: "/plugins", label: "插件", icon: <ApiOutlined />, element: <PluginsPage /> },
   {
     path: "/tasks",

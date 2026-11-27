@@ -34,7 +34,7 @@ from duohelm.registry import PluginEntry, PluginRegistry, PluginStatus
 from duohelm.settings import Settings
 from duohelm.storage import DATASETS, DataStore, SnapshotConflictError
 from duohelm.storage.store import Transaction
-from duohelm.tasks.delisted import discover_securities
+from duohelm.tasks.delisted import DEFAULT_RESCAN_DAYS, discover_securities
 from duohelm.tasks.snapshots import (
     DEFAULT_INDEXES,
     SnapshotUnavailableError,
@@ -82,6 +82,8 @@ class SyncParams(TaskParams):
     """None 表示执行时最近一个已收盘的日子（见 :func:`last_closed_day`）。"""
     indexes: list[str] | None = None
     """保存成分快照的指数代码；None 表示默认的一组宽基指数，空列表表示不保存。"""
+    rescan_days: float = Field(default=DEFAULT_RESCAN_DAYS, ge=0, le=3650, allow_inf_nan=False)
+    """退市股扫描：“没找到”的代码距上次查询超过这么多天就重扫；0 表示每次同步都重扫。"""
 
     @field_validator("indexes")
     @classmethod
@@ -118,6 +120,8 @@ class SyncResult(BaseModel):
     """丢弃的成交量为 0 的行数。"""
     scanned: int = 0
     """退市股扫描：这次新扫描的代码数。能直接列出退市证券的数据源为 0。"""
+    rescanned: int = 0
+    """退市股扫描：这次重扫的、之前记为“没找到”的代码数。"""
     rechecked: int = 0
     """退市股扫描：这次重新查询的、扫到过但不在代码表里的代码数。"""
     snapshot_date: date | None = None
@@ -192,6 +196,7 @@ def data_sync(
                 closed=closed,
                 today=today,
                 indexes=DEFAULT_INDEXES if params.indexes is None else tuple(params.indexes),
+                rescan_days=params.rescan_days,
             )
 
     return TaskType(
@@ -232,6 +237,7 @@ def _run(
     closed: date,
     today: date,
     indexes: Sequence[str],
+    rescan_days: float,
 ) -> SyncResult:
     plugin_id = session.entry.id
     ctx.log(f"同步 {plugin_id}：{start} 至 {end}")
@@ -241,16 +247,20 @@ def _run(
     caps = check_capabilities(plugin_id, session.call("capabilities"))
 
     ctx.progress(0.01, "证券列表")
-    scanned = rechecked = 0
+    scanned = rescanned = rechecked = 0
     if caps.lists_delisted:
         securities = fetch_securities(session)
         base = 0.02
     else:
         scan = discover_securities(
-            ctx, session, data.catalog, progress=lambda f, m: ctx.progress(0.01 + 0.29 * f, m)
+            ctx,
+            session,
+            data.catalog,
+            progress=lambda f, m: ctx.progress(0.01 + 0.29 * f, m),
+            rescan_days=rescan_days,
         )
         securities = known_securities(scan.securities).sort("symbol")
-        scanned, rechecked = scan.scanned, scan.rechecked
+        scanned, rescanned, rechecked = scan.scanned, scan.rescanned, scan.rechecked
         base = 0.3
     ctx.progress(base, "交易日历")
     calendar = fetch_calendar(session, start, end)
@@ -321,6 +331,7 @@ def _run(
         written=written,
         dropped_zero_volume=dropped,
         scanned=scanned,
+        rescanned=rescanned,
         rechecked=rechecked,
         snapshot_date=snap.day,
         snapshot_skipped=snap.skipped,

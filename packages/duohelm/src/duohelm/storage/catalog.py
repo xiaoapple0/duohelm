@@ -17,7 +17,7 @@ from typing import Any
 
 from duohelm.tasks.store import Clock, check_sqlite_version, now_ms, to_datetime
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BUSY_TIMEOUT_MS = 5_000
 HEAD = "main"
 
@@ -59,6 +59,13 @@ CREATE TABLE security_scan (
   scanned_at INTEGER NOT NULL,
   PRIMARY KEY (source, symbol)
 );
+"""
+
+# v3：“没找到”的代码按重扫间隔重新查询，依据是 scanned_at（最近一次查询的时间）。v2 之前
+# 的行没有可靠的查询时间，而且正是这些行可能把存在的代码误记成了没有（#36、#37），
+# 所以把它们的查询时间置 0（未知，视为已过期），下一次同步就重扫。
+_SCHEMA_V3 = """
+UPDATE security_scan SET scanned_at = 0 WHERE found = 0;
 """
 
 
@@ -122,7 +129,7 @@ class Catalog:
                 raise RuntimeError(
                     f"数据目录库版本 {version} 高于本程序支持的 {SCHEMA_VERSION}，请升级 DuoHelm"
                 )
-            for target, script in ((1, _SCHEMA_V1), (2, _SCHEMA_V2)):
+            for target, script in ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3)):
                 if version < target:
                     for statement in script.split(";"):
                         if statement.strip():
@@ -221,7 +228,7 @@ class Catalog:
     # ---- 退市股扫描记录：按数据源记录，扫过的代码不再重复扫描 ----
 
     def record_scan(self, source: str, results: Iterable[tuple[str, bool]]) -> None:
-        """记下数据源 source 有没有这些代码。扫到过（found）的不会再改回没扫到。"""
+        """记下数据源 source 有没有这些代码，以及查询时间。扫到过（found）的不会再改回没扫到。"""
         now = self._clock()
         with self._write() as conn:
             conn.executemany(
@@ -245,6 +252,20 @@ class Catalog:
                 )
             }
         return [s for s in symbols if s not in done]
+
+    def rescan_due(self, source: str, interval_s: float) -> list[str]:
+        """数据源 source 记为“没找到”、且距上次查询已超过 interval_s 秒的代码，按代码排序。
+
+        interval_s 为 0 时，所有“没找到”的代码都到期。查询时间未知（0）的总是到期。
+        """
+        cutoff = self._clock() - int(interval_s * 1000)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT symbol FROM security_scan "
+                "WHERE source = ? AND found = 0 AND scanned_at <= ? ORDER BY symbol",
+                (source, cutoff),
+            )
+            return [str(r[0]) for r in rows]
 
     def found_symbols(self, source: str) -> list[str]:
         """数据源 source 扫到过（或在代码表里出现过）的代码，按代码排序。"""

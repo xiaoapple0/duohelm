@@ -4,8 +4,10 @@
 只用代码表回测过去会有幸存者偏差，所以 ``data.sync`` 先用 ``lookup_securities`` 补齐：
 
 1. 代码表里的证券记为“扫到过”。以后它退市、从代码表里消失，第 3 步会重新查询它
-2. 扫描 :data:`SCAN_RANGES` 里还没扫过的代码，每批结束就记进目录库的 ``security_scan``
-   （按数据源分开）。任务失败、取消后，下次从没扫过的代码接着扫
+2. 扫描 :data:`SCAN_RANGES` 里还没扫过的代码，以及“没找到”且距上次查询超过重扫间隔的代码
+   （#36、#37：数据源一时返回空、或股票在两次同步之间上市又退市，都会让存在的代码被记成
+   没找到），每批结束就记进目录库的 ``security_scan``（按数据源分开，含查询时间）。
+   任务失败、取消后，下次接着扫；重扫查到的转为“扫到过”，进入第 3 步
 3. 扫到过、但现在不在代码表里的代码，每次同步都重新查询，取得最新的上市、退市日期。
    之前扫到过、这次查不到的，任务失败：查不到是“不知道”，不能当成没有这只证券
 
@@ -38,6 +40,8 @@ SCAN_RANGES: tuple[tuple[str, int, int], ...] = (
 """
 SCAN_BATCH = 100
 """每次 lookup_securities 查询多少个代码。"""
+DEFAULT_RESCAN_DAYS = 7.0
+"""“没找到”的代码距上次查询超过这么多天就重扫。0 表示每次同步都重扫。"""
 MIN_LISTED_RATIO = 0.5
 """代码表的证券数少于扫到过的代码数的这个比例时，认为代码表不完整，任务失败。"""
 
@@ -52,6 +56,8 @@ class ScanResult:
     """在市证券加上扫描找到的不在代码表里的证券。"""
     scanned: int
     """这次新扫描的代码数。"""
+    rescanned: int
+    """这次重扫的、之前记为“没找到”的代码数。"""
     rechecked: int
     """这次重新查询的、扫到过但不在代码表里的代码数。"""
 
@@ -70,6 +76,7 @@ def discover_securities(
     catalog: Catalog,
     *,
     progress: Callable[[float, str], None],
+    rescan_days: float = DEFAULT_RESCAN_DAYS,
 ) -> ScanResult:
     """返回完整的证券列表（含退市），扫描记录写进 catalog。progress 的进度为 0 到 1。"""
     source = session.entry.id
@@ -85,8 +92,15 @@ def discover_securities(
         )
     catalog.record_scan(source, [(s, True) for s in sorted(listed_symbols)])
 
-    pending = [s for s in catalog.unscanned(source, scan_symbols()) if s not in listed_symbols]
-    ctx.log(f"退市股扫描：代码表 {len(listed_symbols)} 只；还没扫描的代码 {len(pending)} 个")
+    fresh = [s for s in catalog.unscanned(source, scan_symbols()) if s not in listed_symbols]
+    # 先于下面的扫描取到期名单：这次新扫描的代码不会在同一次同步里又被重扫
+    due = catalog.rescan_due(source, rescan_days * 86400)
+    rescan = [s for s in due if s not in listed_symbols]
+    pending = fresh + rescan
+    ctx.log(
+        f"退市股扫描：代码表 {len(listed_symbols)} 只；还没扫描的代码 {len(fresh)} 个；"
+        f"到期重扫的“没找到”的代码 {len(rescan)} 个"
+    )
     found: list[pl.DataFrame] = []
     for i, batch in enumerate(_batches(pending)):
         ctx.check_cancelled()
@@ -118,10 +132,10 @@ def discover_securities(
         ctx.log(f"有 {still_listed} 只不在代码表里的证券没有退市日，按在市处理", "warning")
     securities = pl.concat([listed, extra]).unique("symbol", keep="first").sort("symbol")
     ctx.log(
-        f"退市股扫描：新扫描 {len(pending)} 个代码，找到 {len(found_now)} 只；"
-        f"重新查询 {len(recheck)} 只"
+        f"退市股扫描：新扫描 {len(fresh)} 个代码，重扫 {len(rescan)} 个，"
+        f"找到 {len(found_now)} 只；重新查询 {len(recheck)} 只"
     )
-    return ScanResult(securities, scanned=len(pending), rechecked=len(recheck))
+    return ScanResult(securities, scanned=len(fresh), rescanned=len(rescan), rechecked=len(recheck))
 
 
 def _lookup(session: PluginSession, batch: Sequence[str]) -> pl.DataFrame:
@@ -146,6 +160,7 @@ def _batches(symbols: Sequence[str]) -> list[Sequence[str]]:
 
 
 __all__ = [
+    "DEFAULT_RESCAN_DAYS",
     "MIN_LISTED_RATIO",
     "SCAN_BATCH",
     "SCAN_RANGES",

@@ -145,8 +145,10 @@ def serve(proto_in: BinaryIO, proto_out: BinaryIO) -> int:
             write_message(proto_out, _error("memory", exc))
             continue
         except Exception as exc:
-            # LookupFailedError 用单独的错误类型，平台据此区分“查询失败（未知）”和别的插件错误
-            kind = "lookup_failed" if isinstance(exc, LookupFailedError) else "plugin_error"
+            # lookup_securities 的 LookupFailedError 用单独的错误类型，平台据此区分
+            # “查询失败（未知）”和别的插件错误；别的方法抛它仍是 plugin_error
+            is_lookup_failed = method == "lookup_securities" and isinstance(exc, LookupFailedError)
+            kind = "lookup_failed" if is_lookup_failed else "plugin_error"
             write_message(proto_out, _error(kind, exc))
             continue
         try:

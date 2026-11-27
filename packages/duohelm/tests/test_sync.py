@@ -34,7 +34,7 @@ id = "fake-src"
 name = "fake-src"
 version = "1.0.0"
 kind = "datasource"
-sdk = ">=0.4,<0.5"
+sdk = ">=0.4.2,<0.5"
 entrypoint = "fake_src:source"
 
 [[permissions.endpoints]]
@@ -43,6 +43,16 @@ description = "测试行情服务"
 default = "127.0.0.1:1"
 scope = "loopback"
 """
+
+LEGACY_SDK = ">=0.4,<0.5"
+"""不导入 LookupFailedError 的旧插件的清单范围（SDK 0.4.2 之前写的插件）。"""
+IMPORT_LOOKUP_FAILED = """from duohelm_sdk import (
+    Capabilities, ConnectionStatus, EndpointNotConfiguredError, Freq, LookupFailedError, endpoint,
+)"""
+IMPORT_LEGACY = (
+    "from duohelm_sdk import "
+    "Capabilities, ConnectionStatus, EndpointNotConfiguredError, Freq, endpoint"
+)
 
 PLUGIN_CODE = """
 import json
@@ -119,6 +129,8 @@ class Plain:
 
     def trading_calendar(self, market, start, end):
         record(f"trading_calendar {market}")
+        if B.get("calendar_lookup_failed"):
+            raise LookupFailedError("别的方法抛了它")
         skip = {date.fromisoformat(d) for d in B.get("calendar_skip", [])}
         return pl.DataFrame(
             {"date": [d for d in CALENDAR if start <= d <= end and d not in skip]},
@@ -209,11 +221,18 @@ def behave(plugin: Path, **behavior: Any) -> None:
     (plugin / "calls.txt").unlink(missing_ok=True)
 
 
-def install(settings: Settings, **behavior: Any) -> Path:
+def install(settings: Settings, *, legacy: bool = False, **behavior: Any) -> Path:
+    """legacy=True：SDK 0.4.2 之前写的旧插件，清单范围 ">=0.4,<0.5"，不导入 LookupFailedError。"""
     path = settings.plugin_dir / "fake-src"
     path.mkdir(parents=True)
-    (path / "duohelm-plugin.toml").write_text(MANIFEST, encoding="utf-8")
-    (path / "fake_src.py").write_text(textwrap.dedent(PLUGIN_CODE), encoding="utf-8")
+    manifest, code = MANIFEST, textwrap.dedent(PLUGIN_CODE)
+    if legacy:
+        manifest = manifest.replace('sdk = ">=0.4.2,<0.5"', f'sdk = "{LEGACY_SDK}"')
+        assert IMPORT_LOOKUP_FAILED in code
+        code = code.replace(IMPORT_LOOKUP_FAILED, IMPORT_LEGACY)
+        assert "LookupFailedError" not in code.replace("raise LookupFailedError", "")
+    (path / "duohelm-plugin.toml").write_text(manifest, encoding="utf-8")
+    (path / "fake_src.py").write_text(code, encoding="utf-8")
     (path / "behavior.json").write_text(json.dumps(behavior), encoding="utf-8")
     return path
 
@@ -674,6 +693,19 @@ def test_lookup_failed_crosses_process_boundary(settings: Settings, small_scan: 
         assert info.value.reason == "plugin_error"
 
 
+def test_lookup_failed_from_other_method_stays_plugin_error(
+    settings: Settings, small_scan: None
+) -> None:
+    """只有 lookup_securities 抛它才是 lookup_failed；别的方法抛它仍是 plugin_error。"""
+    install(settings, calendar_lookup_failed=True)
+    confirm(settings)
+    [entry] = PluginRegistry([settings.plugin_dir]).scan()
+    with session_for(entry, EndpointStore(settings.plugin_config_path), limits=FAST) as session:
+        with pytest.raises(PluginRunError) as info:
+            session.call("trading_calendar", "CN", START, END)
+        assert info.value.reason == "plugin_error"
+
+
 def test_lookup_failed_is_unknown_not_not_found(settings: Settings, small_scan: None) -> None:
     """没扫过的一批代码查询失败：不记“没找到”；其余批次照常落库；任务失败、不写快照；
     下次同步不用等重扫间隔就重查这批代码。"""
@@ -744,7 +776,7 @@ def test_empty_lookup_is_still_not_found(settings: Settings, small_scan: None) -
 def test_plain_exception_from_old_plugin_unchanged(settings: Settings, small_scan: None) -> None:
     """不抛 LookupFailedError 的旧插件：抛普通异常时任务当场失败（plugin_error），
     失败的批次不记录，后面的批次没有查询。"""
-    plugin = install(settings, lists_delisted=False, lookup_fail="600008.SH")
+    plugin = install(settings, legacy=True, lists_delisted=False, lookup_fail="600008.SH")
     confirm(settings)
     store, task_id = run(settings)
     assert "plugin_error" in failed(store, task_id)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import textwrap
 import threading
 import time
@@ -19,6 +20,7 @@ from duohelm.isolation import Limits, PluginRunError
 from duohelm.registry import PluginRegistry
 from duohelm.settings import Settings
 from duohelm.storage import DataStore, SnapshotConflictError
+from duohelm.storage import catalog as catalog_module
 from duohelm.tasks import RetryableError, TaskStore, TaskTypeRegistry, Worker, delisted
 from duohelm.tasks.sync import SyncParams, SyncResult, data_sync, last_closed_day
 from duohelm.tasks.sync import _plugin_errors as plugin_errors  # pyright: ignore[reportPrivateUsage]
@@ -69,10 +71,12 @@ def all_securities():
     # delist_now：让在市的证券在这次运行里变成已退市
     changed = B.get("delist_now", {})
     names = B.get("names", {})
+    absent = B.get("absent", [])  # 这次运行里数据源还不认识的证券（比如还没上市）
     return [
         (row[0], names.get(row[0], row[1]), *row[2:5],
          date.fromisoformat(changed[row[0]]) if row[0] in changed else row[5])
         for row in SECURITIES
+        if row[0] not in absent
     ]
 
 
@@ -524,6 +528,128 @@ def test_failed_scan_resumes_where_it_stopped(settings: Settings, small_scan: No
     assert data.head() == result.snapshot_id
 
 
+def age_not_found(settings: Settings, days: float, symbols: list[str] | None = None) -> None:
+    """把“没找到”的代码的查询时间往前推，模拟时间过去了。"""
+    conn = sqlite3.connect(settings.data_dir / "catalog.db")
+    where = "found = 0" + (f" AND symbol IN ({','.join('?' * len(symbols))})" if symbols else "")
+    conn.execute(
+        f"UPDATE security_scan SET scanned_at = scanned_at - ? WHERE {where}",
+        [int(days * 86_400_000), *(symbols or [])],
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_not_found_is_not_rescanned_within_interval(settings: Settings, small_scan: None) -> None:
+    """数据源对存在的代码一时返回空（#37）：间隔内不重查，证券列表里暂时没有它。"""
+    plugin = install(settings, lists_delisted=False, lookup_loses=["600001.SH"])
+    confirm(settings)
+    run(settings)
+    behave(plugin, lists_delisted=False)  # 数据源恢复了
+    age_not_found(settings, 6)  # 离默认的 7 天还差一天
+    store, task_id = run(settings)
+    result = result_of(store, task_id)
+    assert (result.scanned, result.rescanned) == (0, 0)
+    assert "600001.SH" not in {s for b in lookups(plugin) for s in b.split(",")}
+    securities = DataStore(settings.data_dir).read("securities")
+    assert "600001.SH" not in securities.get_column("symbol").to_list()
+
+
+def test_empty_lookup_is_found_after_rescan_interval(settings: Settings, small_scan: None) -> None:
+    """#37：超过间隔后重扫，发现被误记为没有的 600001.SH，写进证券列表并取到它的日线。"""
+    plugin = install(settings, lists_delisted=False, lookup_loses=["600001.SH"])
+    confirm(settings)
+    run(settings)
+    behave(plugin, lists_delisted=False)
+    age_not_found(settings, 8)
+    store, task_id = run(settings)
+    result = result_of(store, task_id)
+    assert result.scanned == 0
+    assert result.rescanned == 10  # 13 个区间代码，去掉代码表里的 2 个和找到过的 600005.SH
+    data = DataStore(settings.data_dir)
+    row = data.read("securities").filter(pl.col("symbol") == "600001.SH").row(0, named=True)
+    assert row["delist_date"] == date(2009, 12, 25)
+    assert "600001.SH" in data.catalog.found_symbols("fake-src")
+
+    # 查询时间更新了，间隔内不会再重扫；已经转为扫到过，每次同步重新查询
+    behave(plugin, lists_delisted=False)
+    store, task_id = run(settings)
+    assert result_of(store, task_id).rescanned == 0
+    assert "600001.SH" in lookups(plugin)[-1].split(",")
+
+
+def test_security_listed_and_delisted_between_syncs_is_found(
+    settings: Settings, small_scan: None
+) -> None:
+    """#36：第一次同步时数据源还不认识 600005.SH（它之后才上市又退市）。
+    代码被记为没找到；超过间隔后重扫，发现它并写进证券列表。"""
+    plugin = install(settings, lists_delisted=False, absent=["600005.SH"])
+    confirm(settings)
+    run(settings)
+    assert "600005.SH" not in DataStore(settings.data_dir).catalog.found_symbols("fake-src")
+    behave(plugin, lists_delisted=False)  # 现在是已退市的证券
+    age_not_found(settings, 8)
+    store, task_id = run(settings)
+    assert (
+        result_of(store, task_id).rescanned == 10
+    )  # 13 个区间代码，去掉代码表里的 2 个和找到过的 600001.SH
+    data = DataStore(settings.data_dir)
+    row = data.read("securities").filter(pl.col("symbol") == "600005.SH").row(0, named=True)
+    assert row["delist_date"] == date(2024, 1, 3)
+    assert data.read("bars_1d").filter(pl.col("symbol") == "600005.SH").height == 2
+
+
+def test_rescan_days_zero_rescans_every_time(settings: Settings, small_scan: None) -> None:
+    plugin = install(settings, lists_delisted=False)
+    confirm(settings)
+    run(settings)
+    behave(plugin, lists_delisted=False)
+    store, task_id = run(settings, rescan_days=0)
+    assert result_of(store, task_id).rescanned == 9
+    store, task_id = run(settings, rescan_days=0)
+    assert result_of(store, task_id).rescanned == 9
+
+
+def test_rescan_resumes_after_failure(settings: Settings, small_scan: None) -> None:
+    """重扫按批落库：中途失败后，下次只接着重扫还没重扫的代码，不从头来。"""
+    plugin = install(settings, lists_delisted=False)
+    confirm(settings)
+    run(settings)
+    age_not_found(settings, 8)
+    behave(plugin, lists_delisted=False, lookup_fail="600008.SH")
+    store, task_id = run(settings)
+    failed(store, task_id)
+    done = [s for batch in lookups(plugin)[:-1] for s in batch.split(",")]
+    assert len(done) == 5  # 第一批重扫完，第二批（含 600008.SH）出错
+
+    behave(plugin, lists_delisted=False)
+    store, task_id = run(settings)
+    result = result_of(store, task_id)
+    assert result.rescanned == 4
+    *rescan_batches, _recheck = lookups(plugin)
+    assert not {s for b in rescan_batches for s in b.split(",")} & set(done)
+
+
+def test_catalog_v2_rows_are_rescanned_after_migration(tmp_path: Path) -> None:
+    """v2 的“没找到”行没有可靠的查询时间：迁移后视为已过期，总是重扫；扫到过的不受影响。"""
+    path = tmp_path / "catalog.db"
+    conn = sqlite3.connect(path)
+    for script in (catalog_module._SCHEMA_V1, catalog_module._SCHEMA_V2):  # pyright: ignore[reportPrivateUsage]
+        for statement in script.split(";"):
+            if statement.strip():
+                conn.execute(statement)
+    now = 1_800_000_000_000
+    conn.execute("INSERT INTO security_scan VALUES ('a', '600001.SH', 0, ?)", (now,))
+    conn.execute("INSERT INTO security_scan VALUES ('a', '600002.SH', 1, ?)", (now,))
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+    conn.close()
+
+    catalog = catalog_module.Catalog(path, clock=lambda: now + 1000)
+    assert catalog.rescan_due("a", 7 * 86400) == ["600001.SH"]
+    assert catalog.found_symbols("a") == ["600002.SH"]
+
+
 @pytest.mark.parametrize("limit", [0, 1])
 def test_incomplete_listing_fails(settings: Settings, small_scan: None, limit: int) -> None:
     """代码表为空或少了一大截：不知道是不是数据源出错，不扫描、不写快照。"""
@@ -663,6 +789,15 @@ def test_params_validation() -> None:
     with pytest.raises(pydantic.ValidationError):
         SyncParams.model_validate({"plugin_id": "p", "extra": 1})
     assert SyncParams(plugin_id="p").start == date(1990, 12, 19)
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), -1, 3651])
+def test_rescan_days_validation(bad: float) -> None:
+    """inf 会让重扫截止时间溢出，过大的值会超出 SQLite 的整数范围：都在参数校验里拒绝。"""
+    with pytest.raises(pydantic.ValidationError):
+        SyncParams(plugin_id="p", rescan_days=bad)
+    assert SyncParams(plugin_id="p", rescan_days=3650).rescan_days == 3650
+    assert SyncParams(plugin_id="p", rescan_days=0).rescan_days == 0
 
 
 def beijing(day: int, hour: int, minute: int = 0) -> datetime:

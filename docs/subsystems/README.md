@@ -22,7 +22,11 @@
   - POST、PUT、PATCH、DELETE 带了 Origin 头时，必须是平台自己的来源（`http://` 加上面接受的 Host），否则返回 403。浏览器跨站发出的写请求都会带 Origin，所以恶意网页过不了这一关；`Origin: null` 和空的 Origin 也拒绝。不带 Origin 的写请求（命令行脚本、curl）放行，Host 校验已经限定只能从本机访问
   - 监听非本机地址时，局域网里的访问会因为 Host 不对被拒绝
 - 前端开发时由 Vite 代理 `/api` 到后端（见 `web/vite.config.ts`）。
-- 前端的接口类型将从 OpenAPI 生成（M1 引入），之前手写的类型只放在 `web/src/api/` 一处。
+- 前端的接口类型由后端的 OpenAPI 生成，不手写：
+  - `uv run python -m duohelm.api.openapi_export web/openapi.json`（`duohelm.api.openapi_export`）直接从 FastAPI app 取 `app.openapi()`，不启动服务、不访问网络，键排序、缩进固定，输出稳定
+  - 在 `web/` 下运行 `npm run gen:api`：先导出 `web/openapi.json`，再用 `openapi-typescript`（开发依赖）生成 `web/src/api/schema.d.ts`。两个生成文件都提交，不要手改
+  - 改了接口（路径、参数、响应模型）后必须重新生成并一起提交。`test_openapi_export.py` 检查 `web/openapi.json` 与后端一致，忘了就会失败；`schema.d.ts` 是否最新，用 `npm run gen:api` 后 `git diff --exit-code web/` 检查
+  - `web/src/api/client.ts`、`data.ts` 只给生成的类型起前端用的名字。OpenAPI 里没有字段的内容（任务的 `result`、`params` 是自由格式，`data.sync` 的结果类型 `DataSyncResult`）才手写，并在注释里说明
 
 ## 写一份新的子系统文档时
 

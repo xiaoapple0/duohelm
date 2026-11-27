@@ -1,100 +1,45 @@
-// 后端接口的类型。M1 起改为从 OpenAPI 自动生成，届时删除这里的手写类型。
+// 后端接口的类型从 OpenAPI 生成（schema.d.ts，由 `npm run gen:api` 生成，不要手改）。
+// 这里只给生成的类型起前端用的名字；查询参数类型和 data.sync 的结果
+// （后端的任务 result 是自由格式，OpenAPI 里没有字段）仍手写。
+import type { components } from "./schema";
 
-export interface Health {
-  status: string;
-  version: string;
-  sdk_version: string;
-}
+type Schemas = components["schemas"];
 
-export type PluginStatus = "ready" | "invalid" | "incompatible" | "blocked";
-export type PluginKind = "datasource" | "operator" | "factor" | "broker";
+export type Health = Schemas["HealthResponse"];
 
-export type EndpointScope = "loopback" | "lan" | "internet";
+export type PluginStatus = Schemas["PluginStatus"];
+export type PluginKind = Schemas["PluginKind"];
+
+export type EndpointScope = Schemas["EndpointScope"];
 /** default：没有配置；confirmed：用已确认的地址；needs_confirmation：清单的 endpoints 变了，需要重新确认。 */
-export type EndpointState = "default" | "confirmed" | "needs_confirmation";
+export type EndpointState = Schemas["EndpointOut"]["state"];
 
-export interface PluginEndpoint {
-  id: string;
-  description: string;
-  scope: EndpointScope;
-  default: string;
-  state: EndpointState;
-  configured: string | null;
-  /** state 为 confirmed 时是插件拿到并放行的地址；其余状态下是清单的 default，只是显示用，插件拿不到也连不上 */
-  effective: string;
-  confirmed_at: string | null;
-  /** 当前清单 endpoints 那一节的哈希，确认时原样传回 */
-  digest: string;
-}
+/**
+ * effective：state 为 confirmed 时是插件拿到并放行的地址；其余状态下是清单的 default，
+ * 只是显示用，插件拿不到也连不上。digest：当前清单 endpoints 那一节的哈希，确认时原样传回。
+ */
+export type PluginEndpoint = Schemas["EndpointOut"];
 
-export interface EndpointConfirm {
-  address: string;
-  confirm: true;
+/** confirm_internet 在后端有默认值（false），生成的类型把它标成必填，这里保持可省略。 */
+export type EndpointConfirm = Omit<Schemas["EndpointConfirm"], "confirm_internet"> & {
   confirm_internet?: boolean;
-  digest: string;
-}
+};
 
 /** none：没有声明；approved：已确认；needs_approval：没确认过或列表变了，确认前插件不能联网。 */
-export type NetworkState = "none" | "approved" | "needs_approval";
+export type NetworkState = Schemas["NetworkOut"]["state"];
 
-export interface PluginNetwork {
-  hosts: string[];
-  state: NetworkState;
-  approved_hosts: string[] | null;
-  approved_at: string | null;
-  /** 当前列表的哈希，确认时原样传回 */
-  digest: string;
-}
+/** digest：当前列表的哈希，确认时原样传回。 */
+export type PluginNetwork = Schemas["NetworkOut"];
 
-export interface Plugin {
-  id: string;
-  status: PluginStatus;
-  name: string | null;
-  version: string | null;
-  kind: PluginKind | null;
-  path: string;
-  problems: string[];
-  network: PluginNetwork | null;
-  endpoints: PluginEndpoint[];
-}
+export type Plugin = Schemas["PluginOut"];
 
-export type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
-export type LogLevel = "debug" | "info" | "warning" | "error";
+export type TaskStatus = Schemas["TaskOut"]["status"];
+export type LogLevel = Schemas["TaskLogOut"]["level"];
 export type JsonObject = Record<string, unknown>;
 
-export interface Task {
-  id: number;
-  type: string;
-  params: JsonObject;
-  status: TaskStatus;
-  progress: number | null;
-  progress_message: string | null;
-  attempt: number;
-  max_attempts: number;
-  run_after: string;
-  cancel_requested: boolean;
-  error: string | null;
-  result: JsonObject | null;
-  dedupe_key: string | null;
-  created_at: string;
-  started_at: string | null;
-  finished_at: string | null;
-}
-
-export interface TaskLog {
-  id: number;
-  attempt: number;
-  ts: string;
-  level: LogLevel;
-  message: string;
-}
-
-export interface TaskTypeInfo {
-  name: string;
-  description: string;
-  max_attempts: number;
-  params_schema: JsonObject;
-}
+export type Task = Schemas["TaskOut"];
+export type TaskLog = Schemas["TaskLogOut"];
+export type TaskTypeInfo = Schemas["TaskTypeOut"];
 
 export interface TaskQuery {
   status?: TaskStatus;
@@ -102,34 +47,18 @@ export interface TaskQuery {
   limit?: number;
 }
 
-export interface TaskCreate {
-  type: string;
-  params: JsonObject;
-  dedupe_key?: string;
-}
+export type TaskCreate = Schemas["TaskCreate"];
 
-/** GET/PATCH /api/schedules/data-sync 的响应，与 packages/duohelm/src/duohelm/api/schedules.py 的 ScheduleOut 一致。 */
-export interface DataSyncSchedule {
-  enabled: boolean;
-  plugin_id: string | null;
-  /** 每个交易日触发的时刻，HH:MM，北京时间 */
-  time: string;
-  timezone: string;
-  /** 上次处理的北京日期（触发、被去重跳过、判定为非交易日都会记下） */
-  last_trigger_date: string | null;
-  plugin_warning: string | null;
-  /** 已启用但当前快照没有日线或日历：不会自动触发，要先手动全量同步。null 表示未知，原因见 state_error */
-  needs_full_sync: boolean | null;
-  state_error: string | null;
-  /** 带 +08:00 偏移；未启用或未知时为 null。是预估 */
-  next_run_at: string | null;
-}
+/**
+ * GET/PATCH /api/schedules/data-sync 的响应。
+ * time：每个交易日触发的时刻，HH:MM，北京时间。
+ * last_trigger_date：上次处理的北京日期（触发、被去重跳过、判定为非交易日都会记下）。
+ * needs_full_sync：已启用但当前快照没有日线或日历，不会自动触发，要先手动全量同步；null 表示未知，原因见 state_error。
+ * next_run_at：带 +08:00 偏移；未启用或未知时为 null，是预估。
+ */
+export type DataSyncSchedule = Schemas["ScheduleOut"];
 
-export interface DataSyncSchedulePatch {
-  enabled?: boolean;
-  plugin_id?: string;
-  time?: string;
-}
+export type DataSyncSchedulePatch = Schemas["SchedulePatch"];
 
 /** data.sync 的结果（SyncResult）。字段以后端为准，页面对没有认识的字段原样显示。 */
 export interface DataSyncResult {

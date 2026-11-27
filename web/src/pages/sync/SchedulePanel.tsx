@@ -1,6 +1,6 @@
 import { ReloadOutlined } from "@ant-design/icons";
 import { Alert, App, Button, Card, Descriptions, Input, Select, Space, Switch, Typography } from "antd";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   api,
@@ -171,40 +171,72 @@ async function loadLastScheduledTask(): Promise<Task | undefined> {
 export default function SchedulePanel({ plugins, refreshKey, onSelectTask }: Props) {
   // 规则和“上次定时任务”分开取：任务列表取失败不影响规则的查看和修改。
   // 任务结束（refreshKey 变）只重取最近任务，不重取规则，避免覆盖表单里没保存的修改；
-  // 规则只在首次加载、保存成功、点“刷新”时以服务端为准。
-  const scheduleRequest = useRequest(api.dataSyncSchedule);
+  // 规则只在首次加载、保存成功、点“刷新”或“重试”成功时以服务端为准。
+  // 规则自己管理状态：重新加载成功才换成新值；失败时规则是“未知”，不显示旧值的可编辑表单。
+  const [schedule, setSchedule] = useState<DataSyncSchedule>();
+  const [scheduleError, setScheduleError] = useState<string>();
+  const [scheduleLoading, setScheduleLoading] = useState(true);
+  const seq = useRef(0);
+
+  const loadSchedule = useCallback(async () => {
+    const mine = ++seq.current;
+    setScheduleLoading(true);
+    try {
+      const fresh = await api.dataSyncSchedule();
+      if (mine === seq.current) {
+        setSchedule(fresh);
+        setScheduleError(undefined);
+      }
+    } catch (err: unknown) {
+      if (mine === seq.current) {
+        setSchedule(undefined);
+        setScheduleError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (mine === seq.current) {
+        setScheduleLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSchedule();
+  }, [loadSchedule]);
+
   const loadLast = useCallback(() => {
     void refreshKey;
     return loadLastScheduledTask();
   }, [refreshKey]);
   const lastRequest = useRequest(loadLast);
-  const [saved, setSaved] = useState<DataSyncSchedule>();
 
-  const schedule = saved ?? scheduleRequest.data;
-  const loading = scheduleRequest.loading || lastRequest.loading;
+  const loading = scheduleLoading || lastRequest.loading;
 
   function refresh() {
-    setSaved(undefined);
-    scheduleRequest.reload();
+    void loadSchedule();
     lastRequest.reload();
   }
 
   return (
     <Card
       title={T.title}
-      loading={scheduleRequest.loading && !scheduleRequest.data}
+      loading={scheduleLoading && !schedule && !scheduleError}
       extra={
         <Button icon={<ReloadOutlined />} onClick={refresh} loading={loading}>
           {T.refresh}
         </Button>
       }
     >
-      {scheduleRequest.error && (
+      {scheduleError && (
         <Alert
           type="error"
           showIcon
-          message={TEXT.loadFailed}
-          description={scheduleRequest.error.message}
+          message={T.loadFailed}
+          description={scheduleError}
+          action={
+            <Button size="small" onClick={() => void loadSchedule()} loading={scheduleLoading}>
+              {T.retry}
+            </Button>
+          }
         />
       )}
       {schedule && (
@@ -213,7 +245,7 @@ export default function SchedulePanel({ plugins, refreshKey, onSelectTask }: Pro
           lastTask={lastRequest.error ? undefined : lastRequest.data}
           lastTaskError={lastRequest.error?.message}
           plugins={plugins}
-          onSaved={setSaved}
+          onSaved={setSchedule}
           onSelectTask={onSelectTask}
         />
       )}

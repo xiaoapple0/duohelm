@@ -4,6 +4,11 @@ export const TEXT = {
   title: "数据同步",
   loadFailed: "加载失败",
 
+  page: {
+    viewingOther: (id: number) => `正在查看的不是运行中的任务：任务 ${id} 还在排队或运行`,
+    backToActive: "查看运行中的任务",
+  },
+
   manual: {
     title: "手动同步",
     plugin: "行情源插件",
@@ -78,6 +83,8 @@ export const TEXT = {
   schedule: {
     title: "定时同步",
     refresh: "刷新",
+    loadFailed: "加载失败，当前规则未知",
+    retry: "重试",
     desc: "每个交易日在指定时刻（北京时间）自动提交一次增量同步。默认关闭。",
     enabled: "启用",
     plugin: "行情源插件",

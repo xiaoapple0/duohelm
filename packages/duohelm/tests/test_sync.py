@@ -725,7 +725,14 @@ def test_scan_ranges_cover_a_shares_and_bj() -> None:
     ]:
         assert symbol in symbols
     assert "000000.SZ" not in symbols
-    assert "900901.SH" not in symbols  # 不含 B 股
+    # 不含 B 股（#69）
+    assert "900901.SH" not in symbols and "200002.SZ" not in symbols
+    # 不含北交所旧代码 43/83/87 号段（#70）：整段断言，不只是端点
+    legacy = [s for s in symbols if s.endswith(".BJ") and s[:2] in ("43", "83", "87")]
+    assert legacy == []
+    assert {s for s in symbols if s.endswith(".BJ")} == {
+        f"{c:06d}.BJ" for c in range(920000, 921000)
+    }
 
 
 def test_unknown_plugin_fails(settings: Settings) -> None:

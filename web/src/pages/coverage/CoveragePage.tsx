@@ -344,7 +344,12 @@ export default function CoveragePage() {
       </Space>
       <Typography.Text type="secondary">{TEXT.timeNote}</Typography.Text>
       <Alert type="info" showIcon message={TEXT.missingNote} />
-      {loading && data === undefined && <Spin tip={TEXT.loading} />}
+      {loading && data === undefined && (
+        <Space>
+          <Spin />
+          <Typography.Text type="secondary">{TEXT.loading}</Typography.Text>
+        </Space>
+      )}
       {error !== undefined &&
         (error instanceof ApiError && error.status === 404 ? (
           <Alert

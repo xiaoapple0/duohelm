@@ -1,19 +1,29 @@
-import { useMemo, useState } from "react";
-import type { MouseEvent } from "react";
+import { useEffect, useMemo, useRef } from "react";
+import { BarChart, CandlestickChart, ScatterChart } from "echarts/charts";
+import {
+  GridComponent,
+  MarkAreaComponent,
+  MarkLineComponent,
+  TooltipComponent,
+} from "echarts/components";
+import * as echarts from "echarts/core";
+import type { EChartsCoreOption } from "echarts/core";
+import { CanvasRenderer } from "echarts/renderers";
 
-import { extent, isComplete, ticks } from "./analysis";
+import { extent, isComplete } from "./analysis";
 import type { Slot } from "./analysis";
 import { TEXT as T } from "./text";
 
-const W = 1000;
-const H = 560;
-const LEFT = 64;
-const RIGHT = 12;
-const PRICE_TOP = 16;
-const PRICE_BOTTOM = 360;
-const VOL_TOP = 384;
-const VOL_BOTTOM = 490;
-const AXIS_Y = 508;
+echarts.use([
+  BarChart,
+  CandlestickChart,
+  ScatterChart,
+  GridComponent,
+  MarkAreaComponent,
+  MarkLineComponent,
+  TooltipComponent,
+  CanvasRenderer,
+]);
 
 const UP = "#cf1322"; // A 股习惯：红涨绿跌
 const DOWN = "#389e0d";
@@ -54,230 +64,197 @@ function fmtAxisVolume(v: number): string {
   return String(v);
 }
 
-function describe(slot: Slot): string {
-  const tags: string[] = [];
+function describe(slot: Slot): string[] {
+  const lines = [slot.date];
+  const bar = slot.bar;
+  if (bar !== null) {
+    lines.push(
+      `${T.chart.open} ${fmtPrice(bar.open)}　${T.chart.high} ${fmtPrice(bar.high)}`,
+      `${T.chart.low} ${fmtPrice(bar.low)}　${T.chart.close} ${fmtPrice(bar.close)}`,
+      `${T.chart.volume} ${fmtVolume(bar.volume)}`,
+    );
+  }
   if (slot.suspended) {
-    tags.push(T.chart.suspendedTip);
+    lines.push(T.chart.suspendedTip);
   }
   if (slot.exDate) {
-    tags.push(T.chart.exTip);
+    lines.push(T.chart.exTip);
   }
-  const bar = slot.bar;
-  if (bar === null) {
-    return `${slot.date}　${tags.join("　")}`;
-  }
-  return [
-    slot.date,
-    `${T.chart.open} ${fmtPrice(bar.open)}`,
-    `${T.chart.high} ${fmtPrice(bar.high)}`,
-    `${T.chart.low} ${fmtPrice(bar.low)}`,
-    `${T.chart.close} ${fmtPrice(bar.close)}`,
-    `${T.chart.volume} ${fmtVolume(bar.volume)}`,
-    ...tags,
-  ].join("　");
+  return lines;
+}
+
+/**
+ * 缺失（null）一律不画：蜡烛和成交量柱缺值时用 "-"，不用 0 补。
+ * 日期按接口返回的字符串显示，横轴是类目轴，不做时区换算。
+ */
+function buildOption(slots: Slot[]): EChartsCoreOption {
+  const dates = slots.map((s) => s.date);
+  const bars = slots.flatMap((s) => (s.bar ? [s.bar] : []));
+  const prices = extent(bars.flatMap((b) => [b.open, b.high, b.low, b.close]));
+  const pad = prices ? Math.max((prices.max - prices.min) * 0.05, prices.max * 1e-3) : 0;
+  const priceMin = prices ? prices.min - pad : undefined;
+  const priceMax = prices ? prices.max + pad : undefined;
+  const colorOf = (s: Slot): string => {
+    const b = s.bar;
+    if (b === null || !isComplete(b)) {
+      return FLAT;
+    }
+    return b.close > b.open ? UP : b.close < b.open ? DOWN : FLAT;
+  };
+
+  const axisLabel = { color: TEXT, fontSize: 11 };
+  const xAxis = (gridIndex: number, show: boolean) => ({
+    type: "category" as const,
+    gridIndex,
+    data: dates,
+    boundaryGap: true,
+    axisLine: { lineStyle: { color: "#d9d9d9" } },
+    axisTick: { show: false },
+    axisLabel: { ...axisLabel, show },
+    splitLine: { show: false },
+  });
+
+  return {
+    animation: false,
+    textStyle: { color: TEXT },
+    grid: [
+      { left: 64, right: 12, top: 28, height: 330 },
+      { left: 64, right: 12, top: 384, height: 106 },
+    ],
+    xAxis: [xAxis(0, false), xAxis(1, true)],
+    yAxis: [
+      {
+        type: "value",
+        gridIndex: 0,
+        scale: true,
+        min: priceMin,
+        max: priceMax,
+        name: T.chart.priceAxis,
+        nameTextStyle: { color: TEXT, align: "left", fontSize: 11 },
+        axisLabel: { ...axisLabel, formatter: (v: number) => String(+v.toFixed(2)) },
+        splitLine: { lineStyle: { color: GRID } },
+      },
+      {
+        type: "value",
+        gridIndex: 1,
+        name: T.chart.volumeAxis,
+        nameTextStyle: { color: TEXT, align: "left", fontSize: 11 },
+        splitNumber: 3,
+        axisLabel: { ...axisLabel, formatter: (v: number) => fmtAxisVolume(v) },
+        splitLine: { lineStyle: { color: GRID } },
+      },
+    ],
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "cross", link: [{ xAxisIndex: "all" }] },
+      formatter: (params: unknown) => {
+        const list = Array.isArray(params) ? (params as { dataIndex: number }[]) : [];
+        const slot = list[0] ? slots[list[0].dataIndex] : undefined;
+        return slot ? describe(slot).join("<br/>") : "";
+      },
+    },
+    series: [
+      {
+        name: "K",
+        type: "candlestick",
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        // [open, close, low, high]；价格缺任何一项就不画蜡烛
+        data: slots.map((s) =>
+          s.bar && isComplete(s.bar) ? [s.bar.open, s.bar.close, s.bar.low, s.bar.high] : "-",
+        ),
+        itemStyle: { color: UP, color0: DOWN, borderColor: UP, borderColor0: DOWN },
+        markArea: {
+          silent: true,
+          itemStyle: { color: SUSPEND },
+          data: slots
+            .filter((s) => s.suspended)
+            .map((s) => [{ xAxis: s.date }, { xAxis: s.date }]),
+        },
+        markLine: {
+          silent: true,
+          symbol: "none",
+          lineStyle: { color: EX, type: "dashed" },
+          label: { formatter: T.chart.exMark, color: EX, position: "insideEndTop" },
+          data: slots.filter((s) => s.exDate).map((s) => ({ xAxis: s.date })),
+        },
+      },
+      {
+        // 价格缺失的日子：在价格区底部标出，不补值
+        name: T.chart.legendMissing,
+        type: "scatter",
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        symbol: "rect",
+        symbolSize: [6, 6],
+        itemStyle: { color: MISSING },
+        tooltip: { show: false },
+        data:
+          priceMin === undefined
+            ? []
+            : slots.flatMap((s) => (s.bar && !isComplete(s.bar) ? [[s.date, priceMin]] : [])),
+      },
+      {
+        name: T.chart.volume,
+        type: "bar",
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        data: slots.map((s) =>
+          s.bar && s.bar.volume !== null
+            ? { value: s.bar.volume, itemStyle: { color: colorOf(s), opacity: 0.7 } }
+            : "-",
+        ),
+      },
+    ],
+  };
 }
 
 export default function KlineChart({ slots }: { slots: Slot[] }) {
-  const [hover, setHover] = useState<number | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+  const chart = useRef<echarts.ECharts | null>(null);
+  const option = useMemo(() => buildOption(slots), [slots]);
 
-  const layout = useMemo(() => {
-    const bars = slots.flatMap((s) => (s.bar ? [s.bar] : []));
-    const prices = extent(bars.flatMap((b) => [b.open, b.high, b.low, b.close]));
-    const volumes = extent(bars.map((b) => b.volume));
-    const pad = prices ? Math.max((prices.max - prices.min) * 0.05, prices.max * 1e-3) : 0;
-    return {
-      price: prices ? { min: prices.min - pad, max: prices.max + pad } : null,
-      volMax: volumes && volumes.max > 0 ? volumes.max : null,
-    };
-  }, [slots]);
-
-  const n = slots.length;
-  const slotW = (W - LEFT - RIGHT) / Math.max(n, 1);
-  const bodyW = Math.max(slotW * 0.7, 1);
-  const xOf = (i: number) => LEFT + slotW * (i + 0.5);
-  const yPrice = (v: number) => {
-    const p = layout.price;
-    if (!p) {
-      return PRICE_BOTTOM;
-    }
-    return PRICE_BOTTOM - ((v - p.min) / (p.max - p.min || 1)) * (PRICE_BOTTOM - PRICE_TOP);
-  };
-  const yVol = (v: number) =>
-    VOL_BOTTOM - (v / (layout.volMax ?? 1)) * (VOL_BOTTOM - VOL_TOP);
-
-  const priceTicks = layout.price ? ticks(layout.price.min, layout.price.max, 6) : [];
-  const volTicks = layout.volMax ? ticks(0, layout.volMax, 3) : [];
-  const labelEvery = Math.max(Math.ceil(n / 8), 1);
-
-  const onMove = (e: MouseEvent<SVGSVGElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    if (rect.width === 0) {
+  // 项目目前没有暗色模式，不随主题切换；加入暗色模式时在这里按主题 init
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) {
       return;
     }
-    const x = ((e.clientX - rect.left) / rect.width) * W;
-    const i = Math.floor((x - LEFT) / slotW);
-    setHover(i >= 0 && i < n ? i : null);
-  };
+    const instance = echarts.init(el);
+    chart.current = instance;
+    const observer = new ResizeObserver(() => instance.resize());
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      instance.dispose();
+      chart.current = null;
+    };
+  }, []);
 
-  const active = hover !== null ? slots[hover] : undefined;
+  useEffect(() => {
+    chart.current?.setOption(option, true);
+  }, [option]);
 
+  const swatch = { display: "inline-block", width: 10, height: 10, marginRight: 4 };
   return (
     <div>
-      <div style={{ minHeight: 24, fontSize: 13, color: TEXT, marginBottom: 4 }}>
-        {active ? describe(active) : T.chart.hoverHint}
-      </div>
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        width="100%"
+      <div
+        ref={ref}
         role="img"
         aria-label={T.chart.ariaLabel}
-        onMouseMove={onMove}
-        onMouseLeave={() => setHover(null)}
-        style={{ display: "block", maxWidth: "100%" }}
-      >
-        {priceTicks.map((t) => (
-          <g key={`p${t}`}>
-            <line x1={LEFT} x2={W - RIGHT} y1={yPrice(t)} y2={yPrice(t)} stroke={GRID} />
-            <text x={LEFT - 6} y={yPrice(t) + 4} fontSize={11} textAnchor="end" fill={TEXT}>
-              {t}
-            </text>
-          </g>
-        ))}
-        {volTicks.map((t) => (
-          <g key={`v${t}`}>
-            <line x1={LEFT} x2={W - RIGHT} y1={yVol(t)} y2={yVol(t)} stroke={GRID} />
-            <text x={LEFT - 6} y={yVol(t) + 4} fontSize={11} textAnchor="end" fill={TEXT}>
-              {fmtAxisVolume(t)}
-            </text>
-          </g>
-        ))}
-
-        {slots.map((s, i) => {
-          const x = xOf(i);
-          return (
-            <g key={s.date}>
-              {s.suspended && (
-                <rect
-                  x={x - slotW / 2}
-                  y={PRICE_TOP}
-                  width={Math.max(slotW, 1)}
-                  height={VOL_BOTTOM - PRICE_TOP}
-                  fill={SUSPEND}
-                />
-              )}
-              {s.exDate && (
-                <g>
-                  <line
-                    x1={x}
-                    x2={x}
-                    y1={PRICE_TOP}
-                    y2={VOL_BOTTOM}
-                    stroke={EX}
-                    strokeDasharray="4 3"
-                  />
-                  <text x={x} y={PRICE_TOP + 10} fontSize={11} textAnchor="middle" fill={EX}>
-                    {T.chart.exMark}
-                  </text>
-                </g>
-              )}
-              {s.bar && <BarMarks slot={s} x={x} bodyW={bodyW} yPrice={yPrice} yVol={yVol} />}
-            </g>
-          );
-        })}
-
-        {slots.map((s, i) =>
-          i % labelEvery === 0 ? (
-            <text key={`x${s.date}`} x={xOf(i)} y={AXIS_Y} fontSize={11} textAnchor="middle" fill={TEXT}>
-              {s.date}
-            </text>
-          ) : null,
-        )}
-
-        {hover !== null && (
-          <line
-            x1={xOf(hover)}
-            x2={xOf(hover)}
-            y1={PRICE_TOP}
-            y2={VOL_BOTTOM}
-            stroke="#8c8c8c"
-            strokeWidth={0.5}
-          />
-        )}
-
-        <line x1={LEFT} x2={LEFT} y1={PRICE_TOP} y2={VOL_BOTTOM} stroke="#d9d9d9" />
-        <text x={LEFT} y={PRICE_TOP - 4} fontSize={11} fill={TEXT}>
-          {T.chart.priceAxis}
-        </text>
-        <text x={LEFT} y={VOL_TOP - 4} fontSize={11} fill={TEXT}>
-          {T.chart.volumeAxis}
-        </text>
-
-        {/* 图例 */}
-        <g fontSize={11} fill={TEXT} transform={`translate(${LEFT}, ${H - 18})`}>
-          <rect x={0} y={-9} width={10} height={10} fill={SUSPEND} stroke="#8c8c8c" />
-          <text x={14} y={0}>{T.chart.legendSuspended}</text>
-          <line x1={110} x2={110} y1={-10} y2={2} stroke={EX} strokeDasharray="3 2" />
-          <text x={116} y={0}>{T.chart.legendEx}</text>
-          <rect x={180} y={-9} width={10} height={10} fill={MISSING} />
-          <text x={194} y={0}>{T.chart.legendMissing}</text>
-        </g>
-      </svg>
+        style={{ width: "100%", height: 520 }}
+      />
+      <div style={{ display: "flex", gap: 16, fontSize: 11, color: TEXT, marginTop: 4 }}>
+        <span>
+          <i style={{ ...swatch, background: SUSPEND, border: "1px solid #8c8c8c" }} />
+          {T.chart.legendSuspended}
+        </span>
+        <span style={{ color: EX }}>┆ {T.chart.legendEx}</span>
+        <span>
+          <i style={{ ...swatch, background: MISSING }} />
+          {T.chart.legendMissing}
+        </span>
+      </div>
     </div>
-  );
-}
-
-function BarMarks({
-  slot,
-  x,
-  bodyW,
-  yPrice,
-  yVol,
-}: {
-  slot: Slot;
-  x: number;
-  bodyW: number;
-  yPrice: (v: number) => number;
-  yVol: (v: number) => number;
-}) {
-  const bar = slot.bar;
-  if (bar === null) {
-    return null;
-  }
-  const complete = isComplete(bar);
-  // 红涨绿跌；收盘价缺失时不判断涨跌，成交量柱用灰色
-  const color = complete ? (bar.close > bar.open ? UP : bar.close < bar.open ? DOWN : FLAT) : FLAT;
-  return (
-    <g>
-      {complete ? (
-        <g stroke={color} fill={color}>
-          <line x1={x} x2={x} y1={yPrice(bar.high)} y2={yPrice(bar.low)} />
-          <rect
-            x={x - bodyW / 2}
-            y={Math.min(yPrice(bar.open), yPrice(bar.close))}
-            width={bodyW}
-            height={Math.max(Math.abs(yPrice(bar.open) - yPrice(bar.close)), 1)}
-          />
-        </g>
-      ) : (
-        // 缺任何一个价格就不画蜡烛，只在底部标出，不用 0 或其他值补
-        <rect
-          x={x - Math.max(bodyW / 2, 1)}
-          y={PRICE_BOTTOM - 6}
-          width={Math.max(bodyW, 2)}
-          height={6}
-          fill={MISSING}
-        />
-      )}
-      {bar.volume !== null && (
-        <rect
-          x={x - bodyW / 2}
-          y={yVol(bar.volume)}
-          width={bodyW}
-          height={Math.max(VOL_BOTTOM - yVol(bar.volume), 0)}
-          fill={color}
-          opacity={0.7}
-        />
-      )}
-    </g>
   );
 }

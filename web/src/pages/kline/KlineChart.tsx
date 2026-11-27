@@ -84,6 +84,32 @@ function describe(slot: Slot): string[] {
 }
 
 /**
+ * 停牌或缺数据的背景：在一个 grid 里画只在这些日子有值的整格宽度的柱，连续的日子连成一片。
+ * 值取该坐标轴已有范围的上限（价格区用价格上限，成交量区用成交量最大值），不改变坐标范围；
+ * 没有上限（整段没有数据）时不画。不参与 tooltip。
+ */
+function suspendBackground(slots: Slot[], grid: 0 | 1, top: number | undefined) {
+  if (top === undefined || !slots.some((s) => s.suspended)) {
+    return [];
+  }
+  return [
+    {
+      type: "bar" as const,
+      xAxisIndex: grid,
+      yAxisIndex: grid,
+      silent: true,
+      z: 1,
+      barWidth: "100%",
+      barGap: "-100%",
+      barCategoryGap: "0%",
+      tooltip: { show: false },
+      itemStyle: { color: SUSPEND },
+      data: slots.map((s) => (s.suspended ? top : "-")),
+    },
+  ];
+}
+
+/**
  * 缺失（null）一律不画：蜡烛和成交量柱缺值时用 "-"，不用 0 补。
  * 日期按接口返回的字符串显示，横轴是类目轴，不做时区换算。
  */
@@ -94,6 +120,7 @@ function buildOption(slots: Slot[]): EChartsCoreOption {
   const pad = prices ? Math.max((prices.max - prices.min) * 0.05, prices.max * 1e-3) : 0;
   const priceMin = prices ? prices.min - pad : undefined;
   const priceMax = prices ? prices.max + pad : undefined;
+  const volMax = extent(bars.map((b) => b.volume))?.max;
   const colorOf = (s: Slot): string => {
     const b = s.bar;
     if (b === null || !isComplete(b)) {
@@ -154,6 +181,8 @@ function buildOption(slots: Slot[]): EChartsCoreOption {
       },
     },
     series: [
+      ...suspendBackground(slots, 0, priceMax),
+      ...suspendBackground(slots, 1, volMax),
       {
         name: "K",
         type: "candlestick",
@@ -164,13 +193,6 @@ function buildOption(slots: Slot[]): EChartsCoreOption {
           s.bar && isComplete(s.bar) ? [s.bar.open, s.bar.close, s.bar.low, s.bar.high] : "-",
         ),
         itemStyle: { color: UP, color0: DOWN, borderColor: UP, borderColor0: DOWN },
-        markArea: {
-          silent: true,
-          itemStyle: { color: SUSPEND },
-          data: slots
-            .filter((s) => s.suspended)
-            .map((s) => [{ xAxis: s.date }, { xAxis: s.date }]),
-        },
         markLine: {
           silent: true,
           symbol: "none",
@@ -199,6 +221,8 @@ function buildOption(slots: Slot[]): EChartsCoreOption {
         type: "bar",
         xAxisIndex: 1,
         yAxisIndex: 1,
+        barWidth: "70%",
+        barGap: "-100%",
         data: slots.map((s) =>
           s.bar && s.bar.volume !== null
             ? { value: s.bar.volume, itemStyle: { color: colorOf(s), opacity: 0.7 } }

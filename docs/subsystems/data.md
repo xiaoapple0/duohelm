@@ -190,6 +190,65 @@ data/
 
 元数据（任务等）仍在 `$DUOHELM_HOME/duohelm.db`；行情的目录库单独放在 `data/catalog.db`，两者的表结构版本互不影响。
 
+## 读取接口（M1）
+
+源码：核心库 `packages/duohelm/src/duohelm/storage/reader.py`（`MarketReader`），HTTP 接口 `packages/duohelm/src/duohelm/api/data.py`（前缀 `/api/data`，#46）。API 只是核心库的薄封装。
+
+**只读**：读取不写任何数据、不产生快照、不推进当前快照。每个接口都可以用 `snapshot` 参数读指定的旧快照；不传就读当前快照。一次请求内只解析一次快照 id，之后全部用这个 id 读取，同步任务在请求中途提交新快照不会让一次响应混合两个快照。响应里总带着实际读取的 `snapshot` id。
+
+### 接口
+
+| 接口 | 参数 | 返回 |
+|---|---|---|
+| `GET /api/data/snapshots` | `limit`（1–200，默认 50） | `current`（当前快照 id，还没有任何快照时为 null）和快照列表（新的在前，不含已清理的）：id、parent、created_at、task_id、note、stats、is_current |
+| `GET /api/data/snapshots/current` | 无 | 当前快照的元数据；还没有快照时 404 |
+| `GET /api/data/securities` | `snapshot`、`symbol`（精确匹配）、`name_prefix`（名称前缀，按字面匹配，不是正则）、`kind`、`limit`（1–500，默认 100）、`offset` | `total`（筛选后的总数）和当前页，按代码排序 |
+| `GET /api/data/securities/{symbol}/bars` | `snapshot`、`start`、`end`、`adjust`（`none` / `hfq` / `qfq`，默认 `none`）、`base_date` | 某只证券某区间的日线，按日期升序 |
+| `GET /api/data/coverage` | `snapshot`、`kind`、`limit`（1–500，默认 100）、`offset` | 每只证券的覆盖统计，按代码排序，含 `total` |
+
+日期参数（`start`、`end`、`base_date`）只接受 ISO 日期 `YYYY-MM-DD`，含义是**北京时间的交易日**，不做任何时区换算，也不接受时间戳或带时间的字符串；非法值返回 422。`start`、`end` 含两端，不传表示不设下限、上限；`start` 晚于 `end` 返回 422。`snapshot` 必须是 64 位小写十六进制的快照 id，格式不对返回 422（它会拼进文件路径，所以先校验格式）。
+
+### 404 和空结果的区别
+
+- **404**（带说明）：快照不存在或已被清理、还没有任何快照、快照里没有所需的数据集、证券不存在。**不会用空表代替**，因为“没有数据”和“没取到数据”对研究的意义完全不同
+  - 日线需要 `securities`、`bars_1d`；复权（`hfq`、`qfq`）还需要 `adj_factors`：数据集整个不存在时是“不知道有没有除权”，不能当成因子为 1；数据集存在、但这只证券没有因子行，才表示没有除权事件，因子为 1
+  - 覆盖统计需要 `securities`、`bars_1d`、`calendar`（`market = CN`）
+- **200 且 `bars` 为空列表、`empty` 为 true**：证券存在（在 `securities` 里），但所读区间内没有日线（区间在上市前、退市后，或整段停牌）。响应里仍带 `symbol`、`snapshot`、`last_bar_date`（这只证券在这个快照里的最后一根日线，没有任何日线时为 null）。`empty` 是明确的标记，前端据此显示“区间内无数据”，不要用 `bars.length` 猜
+- 证券列表筛选没有匹配项：200，`total` 为 0，`items` 为空。这是筛选结果，不是缺数据
+
+### 复权
+
+只复用 `duohelm_sdk.adjust.adjust_bars`，平台不另写复权逻辑。价格列（open、high、low、close）调整，`volume` 和 `amount` 不调整。
+
+- `none`：返回入库的未复权价格
+- `hfq`：后复权，价格 × factor(t)
+- `qfq`：以基准日 T 为基准的前复权，价格 × factor(t) / factor(T)
+
+**前复权基准日规则**（未来函数红线）：
+
+1. 不传 `base_date` 时，基准日是**所读区间的最后一天**，即返回的日线里最后一根的日期
+2. 传了 `base_date` 时，不能晚于所读区间的结束（`end`；没有传 `end` 时是这只证券的最后一根日线）。晚了返回 422：基准日之后的因子不属于“所读区间”，用了就是拿区间之后的信息改写区间内的价格
+3. 基准日也不能晚于这只证券在这个快照里的最后一个日线日期（该证券没有任何日线时不检查）
+4. 读取因子时多加了一道上限：只取 `date` 不晚于 `end` 的行。这是冗余保护：`adjust_bars` 本身按日期向后查找因子，区间之后的因子行即使读进来也不会影响区间内的价格，去掉这道上限不会让任何测试变红。真正保证“基准日及之前的前复权价格不受之后因子影响”的是规则 1–3 的基准日约束，以及 SDK 因子计算的因果性（有测试守护：基准日之后的因子变化不改变基准日及之前的前复权价格）
+5. 基准日早于 `start` 是允许的：价格 × factor(t) / factor(T)，T 在区间之前
+6. `adjust` 不是 `qfq` 时传 `base_date` 返回 422，避免参数被悄悄忽略
+
+响应里带 `adjust` 和实际使用的 `base_date`（`qfq` 且区间为空且没有传入时为 null）。因为基准日随区间变，同一天的前复权价格在不同的 `end` 下不同，这是前复权的性质；需要稳定的价格序列时用后复权，或固定 `base_date`。
+
+### 覆盖统计
+
+对每只证券（`securities` 里的全部，加上 `bars_1d` 里有但 `securities` 里没有的代码，`name`、`kind` 为 null）：
+
+| 字段 | 含义 |
+|---|---|
+| `first_date`、`last_date` | 这个快照里这只证券日线的首末日期；没有日线时为 null |
+| `bar_count` | 日线根数 |
+| `expected_days` | CN 交易日历在 `first_date` 到 `last_date`（含两端）之间的交易日数；没有日线时为 null |
+| `missing_days` | `expected_days` 减去落在交易日历上的日线根数，即按日历应有而缺失的天数；没有日线时为 null |
+| `off_calendar_bars` | 首末之间不在交易日历上的日线根数（数据或日历有问题的信号），正常为 0 |
+
+**停牌日也算缺失**：同步入库时不保存停牌日的行（见数据源实测结论），所以覆盖统计分不出“停牌”和“漏数据”，`missing_days` 是两者之和。它是进一步检查的线索，不是数据错误的判定；退市前长期停牌的证券，`last_date` 之后到退市日之间的日子不计入（统计只到 `last_date`）。计算用 polars 向量化完成（分组聚合加对交易日历的二分查找），不逐只证券循环。
+
 ## 同步任务（M1）
 
 源码：`packages/duohelm/src/duohelm/tasks/sync.py`。任务类型 `data.sync`，参数：

@@ -149,12 +149,13 @@ class DataStore:
         symbols: Sequence[str] | None = None,
         start: date | None = None,
         end: date | None = None,
+        columns: Sequence[str] | None = None,
         verify: bool = False,
     ) -> pl.DataFrame:
         """读出某个快照（默认当前快照）里一个数据集的生效数据，按主键排序。
 
-        symbols / start / end 只对含 symbol / date 列的数据集生效。verify=True 时先校验
-        每个文件的 sha256。
+        symbols / start / end 只对含 symbol / date 列的数据集生效。columns 只返回这些列
+        （覆盖统计这类大范围读取只取需要的列）。verify=True 时先校验每个文件的 sha256。
         """
         ds = get_dataset(dataset)
         snap = snapshot if snapshot is not None else self.head()
@@ -163,7 +164,9 @@ class DataStore:
             lo = start.year if start else -1
             hi = end.year if end else 10_000
             entries = [(i, e) for i, e in entries if lo <= int(e.partition) <= hi]
-        return self._resolve(ds, entries, symbols=symbols, start=start, end=end, verify=verify)
+        return self._resolve(
+            ds, entries, symbols=symbols, start=start, end=end, columns=columns, verify=verify
+        )
 
     def _resolve(
         self,
@@ -173,12 +176,13 @@ class DataStore:
         symbols: Sequence[str] | None = None,
         start: date | None = None,
         end: date | None = None,
+        columns: Sequence[str] | None = None,
         verify: bool = False,
         keep_deleted: bool = False,
     ) -> pl.DataFrame:
         if not entries:
             empty = pl.DataFrame(schema=ds.file_schema() if keep_deleted else ds.schema)
-            return empty
+            return empty if columns is None else empty.select(columns)
         frames: list[pl.LazyFrame] = []
         for seq, entry in entries:
             path = self.files_dir / entry.path
@@ -196,7 +200,8 @@ class DataStore:
         lf = lf.sort([*keys, _SEQ]).unique(subset=keys, keep="last", maintain_order=True)
         if not keep_deleted:
             lf = lf.filter(~pl.col(DELETED)).drop(DELETED)
-        return lf.drop(_SEQ).sort(keys).collect()
+        lf = lf.drop(_SEQ).sort(keys)
+        return (lf if columns is None else lf.select(columns)).collect()
 
     # ---- 维护 ----
 

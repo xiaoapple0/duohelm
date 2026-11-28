@@ -34,7 +34,7 @@ _PRICE_COLUMNS = ("open", "high", "low", "close")
 
 
 class InvalidExEventError(ValueError):
-    """除权参考价不为正，事件数据有误。"""
+    """除权日之前的收盘价或除权参考价不是有限正数，事件或行情数据有误。"""
 
 
 def factors_from_events(
@@ -55,6 +55,10 @@ def factors_from_events(
 
     同一证券同一天的多个事件比例相乘；因子是比例按日期的累乘。除权日之前没有收盘价的
     事件（上市前的事件）不产生因子。返回格式见 ADJ_FACTORS_SCHEMA，按 symbol、date 排序。
+
+    P 或除权参考价不是有限正数的事件无效（例如数据源把拿不到的价格填成 0：P 为 0 时比例为 0，
+    之后的因子全部变成 0）。``on_invalid="raise"`` 时抛 :class:`InvalidExEventError`；
+    ``"skip"`` 时丢弃这些事件，但之后的因子少乘了这次的比例，调用方应另行核对或告警。
     """
     prices = closes.select(
         pl.col("date").cast(pl.Date),
@@ -80,12 +84,20 @@ def factors_from_events(
             / (1 + pl.col("bonus") + pl.col("rights"))
         ).alias("ref")
     )
-    invalid = joined.filter(~(pl.col("ref") > 0))
+    valid = (
+        pl.col("prev_close").is_finite()
+        & (pl.col("prev_close") > 0)
+        & pl.col("ref").is_finite()
+        & (pl.col("ref") > 0)
+    ).fill_null(False)
+    invalid = joined.filter(~valid)
     if invalid.height:
         if on_invalid == "raise":
             sample = invalid.select("symbol", "date", "prev_close", "ref").head(5).to_dicts()
-            raise InvalidExEventError(f"{invalid.height} 个事件的除权参考价不为正：{sample}")
-        joined = joined.filter(pl.col("ref") > 0)
+            raise InvalidExEventError(
+                f"{invalid.height} 个事件的除权前收盘价或除权参考价不是有限正数：{sample}"
+            )
+        joined = joined.filter(valid)
 
     return (
         joined.group_by("symbol", "date")

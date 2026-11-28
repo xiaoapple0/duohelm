@@ -148,6 +148,27 @@ def test_non_positive_prev_close_is_invalid(prev_close: float) -> None:
     assert check_adj_factors(f).passed
 
 
+def test_null_prev_close_is_invalid_not_before_listing() -> None:
+    """除权日前一行的收盘价是 null：价格未知，不能当成“上市前的事件”悄悄丢掉。"""
+    c = closes([(D[0], "A", 10.0), (D[1], "A", None)])
+    ev = events([(D[2], "A", 1.0, 0.0, 0.0, 0.0)])
+    with pytest.raises(InvalidExEventError):
+        factors_from_events(c, ev)
+    assert factors_from_events(c, ev, on_invalid="skip").height == 0
+
+
+@pytest.mark.parametrize("field", [2, 3, 4, 5])  # cash、bonus、rights、rights_price
+def test_null_event_field_is_invalid(field: int) -> None:
+    """事件字段为 null 是“未知”，不是 0。之前比例为 null，product 跳过它，事件等于不存在。"""
+    c = closes([(D[0], "A", 10.0)])
+    row = [D[1], "A", 1.0, 0.0, 0.0, 0.0]
+    row[field] = None
+    ev = events([tuple(row)])
+    with pytest.raises(InvalidExEventError):
+        factors_from_events(c, ev)
+    assert factors_from_events(c, ev, on_invalid="skip").height == 0
+
+
 def test_check_adj_factors() -> None:
     good = pl.DataFrame({"date": [D[0]], "symbol": ["A"], "factor": [1.2]})
     assert check_adj_factors(good).passed

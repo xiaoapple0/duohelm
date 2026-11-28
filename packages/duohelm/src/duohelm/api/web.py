@@ -17,6 +17,22 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
 INDEX = "index.html"
+MEDIA_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json",
+    ".map": "application/json",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
+    ".wasm": "application/wasm",
+}
+"""构建产物的类型不按 mimetypes 猜：Windows 上 mimetypes 会读注册表，有的机器把 .js 登记成
+text/plain，浏览器对 ``<script type="module">`` 严格检查类型，页面会白屏。表里没有的扩展名
+仍按 mimetypes。"""
 
 
 def has_web_build(web_dir: Path | None) -> bool:
@@ -35,9 +51,15 @@ def install_web(app: FastAPI, web_dir: Path) -> None:
         if target is not None and target.is_file() and target != index:
             # 构建产物的文件名带内容哈希，可以长期缓存
             cache = "public, max-age=31536000, immutable" if _is_asset(root, target) else "no-cache"
-            return FileResponse(target, headers={"Cache-Control": cache})
+            return FileResponse(
+                target,
+                media_type=MEDIA_TYPES.get(target.suffix.lower()),
+                headers={"Cache-Control": cache},
+            )
         # index.html 不缓存：升级后刷新页面就能拿到新版本
-        return FileResponse(index, headers={"Cache-Control": "no-cache"})
+        return FileResponse(
+            index, media_type=MEDIA_TYPES[".html"], headers={"Cache-Control": "no-cache"}
+        )
 
     app.add_api_route("/{path:path}", page, methods=["GET"], include_in_schema=False)
 

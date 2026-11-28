@@ -22,6 +22,14 @@
   - POST、PUT、PATCH、DELETE 带了 Origin 头时，必须是平台自己的来源（`http://` 加上面接受的 Host），否则返回 403。浏览器跨站发出的写请求都会带 Origin，所以恶意网页过不了这一关；`Origin: null` 和空的 Origin 也拒绝。不带 Origin 的写请求（命令行脚本、curl）放行，Host 校验已经限定只能从本机访问
   - 监听非本机地址时，局域网里的访问会因为 Host 不对被拒绝
 - 前端开发时由 Vite 代理 `/api` 到后端（见 `web/vite.config.ts`）。
+- 长期运行时由 `duohelm serve` 直接提供构建好的页面（`duohelm.api.web`），页面和 API 同在 `http://127.0.0.1:<API 端口>`，只需要一个进程：
+  - 页面目录：`DUOHELM_WEB_DIR`，默认仓库检出里的 `web/dist`（`cd web && npm ci && npm run build` 的输出）。目录里没有 `index.html` 时只提供 API，serve 启动时提示怎么构建
+  - `/api/` 下的路径不返回页面：没有对应接口的仍是 404。其他 GET 路径，`dist` 里有这个文件就返回文件，没有就返回 `index.html`（前端用 BrowserRouter，`/sync` 等地址由前端路由处理）
+  - 文件访问边界：只返回 `dist` 里的文件。含 `..`、`.`、空段、反斜杠、冒号（盘符）或以 `/` 开头的路径在访问文件系统之前就拒绝（在 Windows 上解析 `\\server\share` 会去连那台机器），解析（含符号链接）之后不在 `dist` 里的也不返回；这些请求都返回 `index.html`
+  - 文件类型按扩展名用固定的表（`.js` 为 `text/javascript` 等），不按 `mimetypes` 猜：Windows 上它读注册表，`.js` 可能被登记成 `text/plain`，模块脚本会被浏览器拒绝
+  - `index.html` 不缓存；`assets/` 下的文件名带内容哈希，长期缓存
+  - 来源校验对页面同样生效：Host 不对返回 400。页面发出的写请求，Origin 是 API 端口本身，本来就在允许的来源里
+- serve 的输出重定向到文件或管道时（例如任务计划程序写日志），命令行把 stdout、stderr 改成 UTF-8，避免按系统代码页编码时打印中文崩溃。
 - 前端的接口类型由后端的 OpenAPI 生成，不手写：
   - `uv run python -m duohelm.api.openapi_export web/openapi.json`（`duohelm.api.openapi_export`）直接从 FastAPI app 取 `app.openapi()`，不启动服务、不访问网络，键排序、缩进固定，输出稳定
   - 在 `web/` 下运行 `npm run gen:api`：先导出 `web/openapi.json`，再用 `openapi-typescript`（开发依赖）生成 `web/src/api/schema.d.ts`。两个生成文件都提交，不要手改

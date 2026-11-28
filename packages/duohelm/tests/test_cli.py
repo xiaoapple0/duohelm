@@ -38,3 +38,35 @@ def test_redirected_output_does_not_crash_on_chinese(tmp_path, monkeypatch) -> N
     assert main(["plugins"]) == 0
     fake.flush()
     assert "没有找到插件" in raw.getvalue().decode("utf-8")
+
+
+def _serve_output(tmp_path, monkeypatch, args, web_dir=None) -> str:
+    import uvicorn  # noqa: PLC0415
+
+    monkeypatch.setenv("DUOHELM_HOME", str(tmp_path))
+    if web_dir is not None:
+        monkeypatch.setenv("DUOHELM_WEB_DIR", str(web_dir))
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    out = io.StringIO()
+    assert main(["serve", *args], out=out) == 0
+    return out.getvalue()
+
+
+def test_serve_prints_page_url(tmp_path, monkeypatch) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html></html>", encoding="utf-8")
+    text = _serve_output(tmp_path, monkeypatch, ["--port", "8799"], dist)
+    assert "Web 页面: http://127.0.0.1:8799/" in text
+    text = _serve_output(tmp_path, monkeypatch, ["--host", "::1"], dist)
+    assert "http://[::1]:8765/" in text
+    text = _serve_output(tmp_path, monkeypatch, ["--host", "0.0.0.0"], dist)
+    assert "http://127.0.0.1:8765/" in text
+    assert "局域网" in text
+
+
+def test_serve_without_build_explains(tmp_path, monkeypatch) -> None:
+    text = _serve_output(tmp_path, monkeypatch, [], tmp_path / "no-dist")
+    assert "没有找到构建好的 Web 页面" in text
+    assert "npm run build" in text
+    assert "Web 页面:" not in text

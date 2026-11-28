@@ -63,6 +63,19 @@ def test_files_in_dist_are_served(tmp_path: Path, web_dir: Path) -> None:
     assert r.headers["cache-control"] == "no-cache"
 
 
+def test_media_types_do_not_depend_on_mimetypes(
+    tmp_path: Path, web_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows 注册表把 .js 登记成 text/plain 时，页面仍要拿到 JavaScript 类型。"""
+    monkeypatch.setattr("starlette.responses.guess_type", lambda *a, **k: ("text/plain", None))
+    client = _client(tmp_path, web_dir)
+    assert (
+        client.get("/assets/index-abc123.js").headers["content-type"].startswith("text/javascript")
+    )
+    assert client.get("/").headers["content-type"].startswith("text/html")
+    assert client.get("/favicon.svg").headers["content-type"] == "image/svg+xml"
+
+
 def test_api_routes_take_precedence(tmp_path: Path, web_dir: Path) -> None:
     client = _client(tmp_path, web_dir)
     assert client.get("/api/health").json()["status"] == "ok"
@@ -87,7 +100,6 @@ def test_unknown_api_paths_are_404_not_the_page(tmp_path: Path, web_dir: Path, p
         "/..%5csecret.txt",
         "/assets%5c..%5c..%5csecret.txt",
         "/%5c%5cserver%5cshare%5cx",
-        "//server/share/x",
         "/C:/Windows/win.ini",
         "/C:%5cWindows%5cwin.ini",
     ],

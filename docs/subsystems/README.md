@@ -22,12 +22,16 @@
   - POST、PUT、PATCH、DELETE 带了 Origin 头时，必须是平台自己的来源（`http://` 加上面接受的 Host），否则返回 403。浏览器跨站发出的写请求都会带 Origin，所以恶意网页过不了这一关；`Origin: null` 和空的 Origin 也拒绝。不带 Origin 的写请求（命令行脚本、curl）放行，Host 校验已经限定只能从本机访问
   - 监听非本机地址时，局域网里的访问会因为 Host 不对被拒绝
 - 前端开发时由 Vite 代理 `/api` 到后端（见 `web/vite.config.ts`）。
+- 前端的接口类型由后端的 OpenAPI 生成，不手写：
+  - `uv run python -m duohelm.api.openapi_export web/openapi.json`（`duohelm.api.openapi_export`）直接从 FastAPI app 取 `app.openapi()`，不启动服务、不访问网络，键排序、缩进固定，输出稳定
+  - 在 `web/` 下运行 `npm run gen:api`：先导出 `web/openapi.json`，再用 `openapi-typescript`（开发依赖）生成 `web/src/api/schema.d.ts`。两个生成文件都提交，不要手改
+  - 改了接口（路径、参数、响应模型）后必须重新生成并一起提交。`test_openapi_export.py` 检查 `web/openapi.json` 与后端一致，忘了就会失败；`schema.d.ts` 是否最新，用 `npm run gen:api` 后 `git diff --exit-code web/` 检查
+  - `web/src/api/client.ts`、`data.ts` 只给生成的类型起前端用的名字。查询参数类型也取自生成的 `operations[...]["parameters"]["query"]`。手写的只剩 OpenAPI 里没有字段的内容：任务 `result`、`params` 是自由格式（生成类型里就是 `Record<string, unknown>`），`data.sync` 的结果类型 `DataSyncResult`，并在注释里说明
 - 前端测试（在 `web/` 下运行，CI 的 job 名称是 `Web tests`）：
   - `npm test`：vitest 单元测试，测 `src/` 下的纯函数，文件命名为 `*.test.ts`，与被测文件放在一起（例如 `src/api/client.test.ts` 测 `query()`）。不需要浏览器
   - `npm run test:e2e`：Playwright 冒烟测试（`web/e2e/`），K 线查看、覆盖情况、任务中心、插件各一个。测试自己先 `npm run build`，再用 `vite preview` 在 127.0.0.1:4183 提供页面；`/api/**` 由 `page.route` 拦截并返回 `e2e/fixtures.ts` 里的固定数据，所以**不需要启动后端**，也不访问外网（127.0.0.1 以外的请求会被拦下并让测试失败）。断言页面的关键元素出现、没有预期之外的接口请求、控制台没有 error（antd 与 React 19 的兼容提示除外）
   - 第一次运行前安装浏览器：`npx playwright install chromium`（只用 Chromium）
   - 新增页面或接口时，在 `e2e/fixtures.ts` 里补上对应的固定数据，形状照 `src/api/` 里的类型
-- 前端的接口类型将从 OpenAPI 生成（M1 引入），之前手写的类型只放在 `web/src/api/` 一处。
 
 ## 写一份新的子系统文档时
 

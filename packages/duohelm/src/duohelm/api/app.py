@@ -16,6 +16,7 @@ from duohelm.api.plugins import plugin_router
 from duohelm.api.schedules import schedule_router
 from duohelm.api.security import install_origin_guard
 from duohelm.api.tasks import task_router
+from duohelm.api.web import has_web_build, install_web
 from duohelm.endpoints import EndpointStore
 from duohelm.registry import PluginRegistry
 from duohelm.settings import Settings
@@ -104,4 +105,6 @@ def create_app(
         return HealthResponse(status="ok", version=__version__, sdk_version=SDK_VERSION)
 
     app.add_api_route("/api/health", health, methods=["GET"], response_model=HealthResponse)
+    if has_web_build(settings.web_dir) and settings.web_dir is not None:
+        install_web(app, settings.web_dir)  # 放在最后：只接住前面的路由都没匹配的 GET
     return app

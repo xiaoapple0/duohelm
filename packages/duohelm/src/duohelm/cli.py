@@ -63,8 +63,25 @@ def _serve(settings: Settings, out: TextIO) -> int:
             f"警告：正在监听 {settings.host}。现阶段 API 没有登录保护，局域网内的任何人都能访问。",
             file=out,
         )
+    from duohelm.api.web import has_web_build  # noqa: PLC0415
+
+    if has_web_build(settings.web_dir):
+        print(f"Web 页面: http://{_url_host(settings.host)}:{settings.port}/", file=out)
+    else:
+        print(
+            f"没有找到构建好的 Web 页面（{settings.web_dir}），只提供 API。"
+            "在仓库的 web/ 目录下运行 npm ci && npm run build 后重启；"
+            "或用 DUOHELM_WEB_DIR 指定页面目录",
+            file=out,
+        )
     uvicorn.run(create_app(settings, run_workers=True), host=settings.host, port=settings.port)
     return 0
+
+
+def _url_host(host: str) -> str:
+    if host in ("0.0.0.0", "::"):
+        return "127.0.0.1"
+    return f"[{host}]" if ":" in host else host
 
 
 if __name__ == "__main__":

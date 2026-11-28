@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import subprocess
@@ -702,3 +703,82 @@ def test_capabilities_roundtrip_and_unknown_freq_skipped(tmp_path: Path) -> None
     assert decoded.freqs == (Freq.DAY,)
     assert decoded.lists_delisted is False
     assert decoded.exact_delist_date is True  # 缺少这个字段（父子进程 SDK 不一致时）：按默认值
+    assert decoded.categories is None  # 缺少 categories：没有声明
+
+
+def test_old_plugin_capabilities_unchanged_through_session(tmp_path: Path) -> None:
+    """SDK 0.4.4 之前的插件不设 categories：经过子进程读出来是 None，其他字段不变。"""
+    from duohelm_sdk import Capabilities, Freq  # noqa: PLC0415
+
+    root = tmp_path / "plugins"
+    path = root / "iso-source"
+    path.mkdir(parents=True)
+    (path / "iso_source.py").write_text(DATASOURCE_CODE, encoding="utf-8")
+    (path / "duohelm-plugin.toml").write_text(DATASOURCE_MANIFEST, encoding="utf-8")
+    [entry] = PluginRegistry([root]).scan()
+    assert entry.status is PluginStatus.READY, entry.problems
+    with PluginSession(entry, limits=FAST, endpoints={}, network=()) as s:
+        caps = s.call("capabilities")
+    assert caps == Capabilities(markets=("CN",), freqs=(Freq.DAY,), fields=("open",))
+    assert caps.categories is None
+    assert caps.lists_delisted is False
+    assert caps.exact_delist_date is True
+
+
+def test_capabilities_categories_roundtrip(tmp_path: Path) -> None:
+    from duohelm_sdk import Capabilities, Freq  # noqa: PLC0415
+
+    store = FrameStore(tmp_path, "t")
+    declarations: list[tuple[str, ...] | None] = [
+        None,
+        ("securities", "calendar", "bars_1d", "adj_factors"),
+        ("bars_1d",),
+        (),
+    ]
+    for categories in declarations:
+        caps = Capabilities(markets=("CN",), freqs=(Freq.DAY,), fields=(), categories=categories)
+        assert decode(encode(caps, store), store) == caps
+    # 显式的 null 和缺字段一样：没有声明，不是“不提供任何类别”
+    explicit_null = {
+        "$capabilities": {"markets": ["CN"], "freqs": ["1d"], "fields": [], "categories": None}
+    }
+    assert decode(explicit_null, store).categories is None
+
+
+def test_capabilities_unknown_category_skipped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = FrameStore(tmp_path, "t")
+    newer = {
+        "$capabilities": {
+            "markets": ["CN"],
+            "freqs": ["1d"],
+            "fields": [],
+            "categories": ["bars_1m", "bars_1d", "financials", "adj_factors"],
+        }
+    }
+    with caplog.at_level(logging.WARNING, logger="duohelm.isolation.protocol"):
+        decoded = decode(newer, store)
+    # 不认识的 id 跳过，认识的保持顺序；不报错
+    assert decoded.categories == ("bars_1d", "adj_factors")
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "bars_1m" in logged
+    assert "financials" in logged
+    # 只声明了不认识的类别：读成空元组（声明了、但不提供现有的任何类别），不是 None
+    only_new = {"$capabilities": {**newer["$capabilities"], "categories": ["bars_1m"]}}
+    assert decode(only_new, store).categories == ()
+
+
+def test_capabilities_categories_single_string_rejected(tmp_path: Path) -> None:
+    from duohelm_sdk import Capabilities, Freq  # noqa: PLC0415
+
+    # 单个字符串会被逐字符拆开、读成“不提供任何类别”，编码时直接拒绝
+    store = FrameStore(tmp_path, "t")
+    caps = Capabilities(
+        markets=("CN",),
+        freqs=(Freq.DAY,),
+        fields=(),
+        categories="bars_1d",  # pyright: ignore[reportArgumentType]
+    )
+    with pytest.raises(ProtocolError, match="categories"):
+        encode(caps, store)

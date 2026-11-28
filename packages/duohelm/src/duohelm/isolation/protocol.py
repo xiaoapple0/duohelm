@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import struct
 from datetime import date, datetime
 from pathlib import Path
@@ -22,6 +23,11 @@ from typing import Any, BinaryIO, cast
 import polars as pl
 
 from duohelm_sdk import Capabilities, ConnectionStatus, Freq
+
+logger = logging.getLogger(__name__)
+
+DATA_CATEGORIES = frozenset({"securities", "calendar", "bars_1d", "adj_factors"})
+"""平台认识的数据类别 id，见 ``Capabilities.categories`` 和 docs/subsystems/data-sources.md。"""
 
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 _HEADER = struct.Struct(">I")
@@ -113,6 +119,12 @@ def encode(value: object, frames: FrameStore) -> Any:  # noqa: PLR0911  按类�
     if isinstance(value, date):
         return {"$date": value.isoformat()}
     if isinstance(value, Capabilities):
+        if isinstance(value.categories, str):
+            # 单个字符串会被逐字符拆开，读成“不提供任何类别”，所以直接拒绝
+            raise ProtocolError(
+                "Capabilities.categories 必须是字符串的元组，"
+                f"不能是单个字符串：{value.categories!r}"
+            )
         return {
             "$capabilities": {
                 "markets": list(value.markets),
@@ -120,6 +132,9 @@ def encode(value: object, frames: FrameStore) -> Any:  # noqa: PLR0911  按类�
                 "fields": list(value.fields),
                 "lists_delisted": value.lists_delisted,
                 "exact_delist_date": value.exact_delist_date,
+                "categories": (
+                    None if value.categories is None else [str(c) for c in value.categories]
+                ),
             }
         }
     if isinstance(value, ConnectionStatus):
@@ -156,8 +171,27 @@ def decode(value: Any, frames: FrameStore) -> Any:  # noqa: PLR0911  按类型�
             fields=tuple(cast(list[str], caps["fields"])),
             lists_delisted=bool(caps.get("lists_delisted", False)),
             exact_delist_date=bool(caps.get("exact_delist_date", True)),
+            categories=_decode_categories(caps.get("categories")),
         )
     if "$connection_status" in obj:
         status = cast(dict[str, Any], obj["$connection_status"])
         return ConnectionStatus(ok=bool(status["ok"]), message=str(status.get("message", "")))
     return {k: decode(v, frames) for k, v in obj.items()}
+
+
+def _decode_categories(raw: object) -> tuple[str, ...] | None:
+    """``Capabilities.categories``：缺字段或为 null 时是 None（插件没有声明）。
+
+    类别 id 以后可能新增（同枚举新增取值的规则）：不认识的 id 跳过并记日志，不能报错。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ProtocolError(f"Capabilities.categories 必须是列表：{raw!r}")
+    known: list[str] = []
+    for item in cast(list[object], raw):
+        if isinstance(item, str) and item in DATA_CATEGORIES:
+            known.append(item)
+        else:
+            logger.warning("插件声明了不认识的数据类别 %r，已跳过", item)
+    return tuple(known)

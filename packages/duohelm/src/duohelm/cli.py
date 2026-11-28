@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
@@ -27,6 +28,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> int:
+    if out is None:
+        _utf8_when_redirected()
     stream: TextIO = out if out is not None else sys.stdout
     args = _parser().parse_args(argv)
     settings = Settings.from_env()
@@ -76,6 +79,18 @@ def _serve(settings: Settings, out: TextIO) -> int:
         )
     uvicorn.run(create_app(settings, run_workers=True), host=settings.host, port=settings.port)
     return 0
+
+
+def _utf8_when_redirected() -> None:
+    """输出重定向到文件或管道时（例如任务计划程序把输出写进日志），改用 UTF-8。
+
+    Windows 上重定向的输出按系统的 ANSI 代码页编码（cp1252、cp936 等），打印中文会抛
+    UnicodeEncodeError，serve 来不及启动就退出；日志里的中文也会变成“Logging error”。
+    直接输出到控制台时 Python 本来就用 UTF-8，不改。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper) and not stream.isatty():
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
 def _url_host(host: str) -> str:

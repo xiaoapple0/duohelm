@@ -25,3 +25,16 @@ def test_plugins_command_empty(tmp_path, monkeypatch) -> None:
     out = io.StringIO()
     assert main(["plugins"], out=out) == 0
     assert "没有找到插件" in out.getvalue()
+
+
+def test_redirected_output_does_not_crash_on_chinese(tmp_path, monkeypatch) -> None:
+    """输出重定向到按 cp1252 编码的文件时（英文 Windows 上任务计划程序写日志），
+    中文不能让命令崩溃。"""
+    monkeypatch.setenv("DUOHELM_HOME", str(tmp_path))
+    raw = io.BytesIO()
+    fake = io.TextIOWrapper(raw, encoding="cp1252")
+    monkeypatch.setattr("sys.stdout", fake)
+    monkeypatch.setattr("sys.stderr", io.TextIOWrapper(io.BytesIO(), encoding="cp1252"))
+    assert main(["plugins"]) == 0
+    fake.flush()
+    assert "没有找到插件" in raw.getvalue().decode("utf-8")

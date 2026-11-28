@@ -38,8 +38,11 @@ uv run pytest
 # 启动 API（默认只监听 127.0.0.1）
 uv run duohelm serve
 
-# 前端
+# 前端（开发：Vite 开发服务器，http://127.0.0.1:5173）
 cd web && npm install && npm run dev
+
+# 前端（构建后由 duohelm serve 直接提供，http://127.0.0.1:8765）
+cd web && npm ci && npm run build
 ```
 
 ## 文档

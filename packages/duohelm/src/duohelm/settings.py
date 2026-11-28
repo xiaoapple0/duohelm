@@ -12,6 +12,9 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_WEB_PORT = 5173
 """Web 开发服务器（vite）的端口。它把 /api 代理到后端，浏览器发来的 Host、Origin 是它的端口。"""
+REPO_WEB_DIR = Path(__file__).resolve().parents[4] / "web" / "dist"
+"""仓库检出里构建好的页面（``cd web && npm run build`` 的输出）。duohelm 只以 uv workspace
+的方式从仓库检出运行，不单独发布，所以按源码位置找。"""
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,8 @@ class Settings:
     """serve 进程里同时运行的任务数。"""
     web_port: int = DEFAULT_WEB_PORT
     """Web 页面所在的端口。API 只接受 Host 和 Origin 为本机这个端口或 API 端口的请求。"""
+    web_dir: Path | None = None
+    """构建好的 Web 页面目录。目录里有 index.html 时，serve 在 API 端口上同时提供页面。"""
 
     @property
     def plugin_dir(self) -> Path:
@@ -49,7 +54,7 @@ class Settings:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
         """读取 DUOHELM_HOME（默认 ~/.duohelm）、DUOHELM_DEV、DUOHELM_TASK_WORKERS、
-        DUOHELM_WEB_PORT（默认 5173）。"""
+        DUOHELM_WEB_PORT（默认 5173）、DUOHELM_WEB_DIR（默认仓库里的 web/dist）。"""
         env = os.environ if env is None else env
         raw = env.get("DUOHELM_HOME", "").strip()
         home = Path(raw).expanduser() if raw else Path.home() / ".duohelm"
@@ -62,7 +67,11 @@ class Settings:
         web_port = int(web_raw) if web_raw else DEFAULT_WEB_PORT
         if not 1 <= web_port <= 65535:
             raise ValueError(f"DUOHELM_WEB_PORT 必须是 1–65535 的整数，当前为 {web_raw}")
-        return cls(home=home, dev=dev, task_workers=task_workers, web_port=web_port)
+        web_dir_raw = env.get("DUOHELM_WEB_DIR", "").strip()
+        web_dir = Path(web_dir_raw).expanduser() if web_dir_raw else REPO_WEB_DIR
+        return cls(
+            home=home, dev=dev, task_workers=task_workers, web_port=web_port, web_dir=web_dir
+        )
 
 
 def is_loopback(host: str) -> bool:

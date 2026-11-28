@@ -201,7 +201,7 @@ with session_for(
 - 新增可选字段是兼容改动；删除字段、改变含义、新增必填字段是不兼容改动
 - **枚举以后可能新增取值**，新增取值是兼容改动。契约中的枚举包括 `SECURITIES_SCHEMA` 的 `kind` 和 `exchange`、`Freq`、`Capabilities.markets` 等。使用方（平台和插件）遇到不认识的取值时，**跳过这一项并记一条日志，不能报错**：
   - 证券列表用 `schema.known_securities()` 过滤，`checks.check_securities()` 对不认识的取值只做说明，不判为不合格
-  - 隔离协议解码 `Capabilities` 时，跳过不认识的 `Freq`
+  - 隔离协议解码 `Capabilities` 时，跳过不认识的 `Freq`；不认识的 `categories` id 跳过并记日志（SDK 0.4.4 起）
   - 清单字段（如插件的 `kind`）不在此列：清单受 `sdk` 版本范围约束，用了新取值的插件会被判为 SDK 不兼容，而不是被当作错误
 
 ### `index_constituents` 的 `in_date`、`out_date`
@@ -215,6 +215,15 @@ with session_for(
 ### 变更记录
 
 **含义澄清，不升版本（2026-11-27，维护者决定）**：`index_constituents` 的 `in_date`、`out_date` 此前只在文档字符串里写了“仍在指数中则为 null”，现在写全了上面的含义（平台的指数成分快照早已按这个含义过滤，见 `data.md`）。方法签名、返回格式和 `__all__` 都没有变，SDK 版本号不变。eltdx 和 xtdata 插件在 main 上都只返回当前成分（`out_date` 全为 null），与此一致，不需要改动
+
+**SDK 0.4.4（M1）**，兼容，只新增一个可选字段，并改一处说明文字（#99，见 `data-sources.md` 的“插件声明提供的类别”）：
+
+- `Capabilities.categories: tuple[str, ...] | None = None`：数据源提供哪些数据类别，类别 id 为 `securities`、`calendar`、`bars_1d`、`adj_factors`（含义见 `data-sources.md` 的“数据类别”）。只声明提供哪些类别，不声明“能取多久”等细节
+- `None` 表示没有声明，0.4.3 及以前的插件都是这样（插件和平台共用一个 Python 环境，取 dataclass 的默认值）。平台按提供上面四个类别处理；以后新增的类别只有显式声明才算提供。空元组表示声明了、但不提供任何类别，和 `None` 不同
+- 类别 id 以后可能新增（按上面“枚举以后可能新增取值”的规则）：隔离协议解码时不认识的 id 跳过并记一条警告日志，不报错；缺少这个字段或为 null 时读成 `None`
+- `DataSourcePlugin.lookup_securities` 的 docstring：查询失败抛 `LookupFailedError` 时，平台把这批代码记为“未知”，下次同步照常重查；**这次同步是否因此失败，改为“由平台按调用的上下文决定”**（之前写的是“这次同步失败”）。只改说明文字，签名、返回格式和平台现有行为都不变：退市股扫描中的失败仍让同步失败
+- 平台这一版只编解码这个字段，**还不使用它**（按类别配置主、备数据源在后续的平台 PR 里实现）。`__all__`、方法签名、数据格式没有变
+- 迁移：不需要改代码。要声明类别的插件，在 `capabilities()` 里设置 `categories`，清单的 `sdk` 改为 `">=0.4.4,<0.5"`（0.4.3 及以前的平台构造 `Capabilities` 时不认识这个参数）。官方插件 eltdx、xtdata 的声明在插件仓库单独提 PR
 
 **SDK 0.4.3（M1）**，兼容，修复 `duohelm_sdk.adjust.factors_from_events`（不在 `__all__` 里，签名和返回格式不变）：
 

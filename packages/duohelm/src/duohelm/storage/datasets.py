@@ -89,6 +89,28 @@ QUALITY_REPORT_SCHEMA: dict[str, pl.DataType] = {"key": pl.String(), "report": p
 和数据在同一个事务里写入，随快照保存；每次同步覆盖上一次的报告。快照里没有这一行时，表示
 这个快照没有质量报告（早于 #31 的快照），不是“没有问题”。"""
 
+DATA_SOURCES_SCHEMA: dict[str, pl.DataType] = {
+    "category": pl.String(),
+    "key": pl.String(),
+    "source": pl.String(),
+    "role": pl.String(),
+}
+"""每只证券每个数据类别的来源（平台的数据集，#99，见 docs/subsystems/data-sources.md 的
+“来源记录”）。``key``：``calendar`` 类别写市场（如 ``CN``），其他类别写证券代码；``source``
+是写入它的插件 id；``role`` 是写入时这个插件在配置里的角色（``primary`` 或 ``backup``）。
+没有时间戳：同样的来源得到同样的快照。**没有行就是“来源未知”**，不能当成主数据源；快照里
+没有这个数据集（升级前的快照）时同样全部是“来源未知”。读取见 ``duohelm.storage.sources``。"""
+
+SOURCE_CONFIG_SCHEMA: dict[str, pl.DataType] = {
+    "category": pl.String(),
+    "role": pl.String(),
+    "plugin_id": pl.String(),
+    "plugin_version": pl.String(),
+}
+"""写入这个快照时每个数据类别主、备数据源的插件 id 和版本（平台的数据集，#99，见
+data-sources.md 的“可复现”）。没有备用时没有 ``backup`` 行；快照里没有这个数据集时是
+“不知道当时的配置”，不是“没有配置”。"""
+
 DATASETS: dict[str, Dataset] = {
     d.name: d
     for d in (
@@ -117,6 +139,8 @@ DATASETS: dict[str, Dataset] = {
             partition_by_year="date",
             added_columns=("observed_at",),
         ),
+        Dataset("data_sources", DATA_SOURCES_SCHEMA, ("category", "key")),
+        Dataset("source_config", SOURCE_CONFIG_SCHEMA, ("category", "role")),
     )
 }
 

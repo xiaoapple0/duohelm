@@ -50,6 +50,7 @@ cd web && npm install && npm run dev
 | [ROADMAP.md](ROADMAP.md) | 里程碑 |
 | [AGENTS.md](AGENTS.md) | 给 coding agent 的入口说明 |
 | [LESSONS.md](LESSONS.md) | 从已合并工作中总结的教训 |
+| [docs/running.md](docs/running.md) | 在自己的 Windows 机器上长期运行：安装插件、同步、定时同步、开机启动 |
 | [docs/code-standards.md](docs/code-standards.md) | 验收标准、合并与发版条件 |
 | [docs/subsystems/](docs/subsystems/README.md) | 各子系统设计 |
 

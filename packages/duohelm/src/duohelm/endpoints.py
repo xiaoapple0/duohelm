@@ -40,7 +40,7 @@ from duohelm_sdk import Address, AddressError, Endpoint, EndpointScope, Manifest
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 5_000
 
 _SCHEMA_V1 = """
@@ -70,6 +70,17 @@ CREATE TABLE permission_audit (
 );
 CREATE INDEX permission_audit_plugin ON permission_audit(plugin_id, id);
 """
+
+_SCHEMA_V2 = """
+CREATE TABLE data_source_config (
+  category         TEXT    PRIMARY KEY,
+  primary_plugin   TEXT    NOT NULL,
+  backup_plugin    TEXT,
+  updated_at       INTEGER NOT NULL
+);
+"""
+"""v2（#99）：每个数据类别的主、备数据源，见 docs/subsystems/data-sources.md 的“配置”。
+只新增表，不改 v1 的表；读写见 :mod:`duohelm.data_source_config`。"""
 
 EndpointState = Literal["default", "confirmed", "needs_confirmation"]
 NetworkState = Literal["none", "approved", "needs_approval"]
@@ -207,6 +218,20 @@ def _to_datetime(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=UTC)
 
 
+def migrate_plugin_config(conn: sqlite3.Connection, path: Path) -> None:
+    """把 ``plugin-config.db`` 升级到当前版本。在调用方的事务里执行；每一版只新增表。"""
+    version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if version > SCHEMA_VERSION:
+        raise RuntimeError(f"{path} 的版本 {version} 比当前平台支持的 {SCHEMA_VERSION} 新")
+    for since, schema in ((1, _SCHEMA_V1), (2, _SCHEMA_V2)):
+        if version < since:
+            for statement in schema.split(";"):
+                if statement.strip():
+                    conn.execute(statement)
+    if version < SCHEMA_VERSION:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
 class EndpointStore:
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -236,16 +261,7 @@ class EndpointStore:
 
     def _migrate(self) -> None:
         with self._transaction() as conn:
-            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-            if version > SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"{self._path} 的版本 {version} 比当前平台支持的 {SCHEMA_VERSION} 新"
-                )
-            if version < 1:
-                for statement in _SCHEMA_V1.split(";"):
-                    if statement.strip():
-                        conn.execute(statement)
-                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            migrate_plugin_config(conn, self._path)
 
     # ---- 读 ----
 

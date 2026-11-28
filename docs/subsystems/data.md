@@ -143,8 +143,12 @@ data/
 | `st_daily` | date、symbol、name、status、observed_at | date、symbol | 按 date 的年份 |
 | `index_members_daily` | date、index、symbol、observed_at | date、index、symbol | 按 date 的年份 |
 | `quality_report` | key、report | key | 不分区 |
+| `data_sources` | category、key、source、role | category、key | 不分区 |
+| `source_config` | category、role、plugin_id、plugin_version | category、role | 不分区 |
 
 `st_daily` 和 `index_members_daily` 是每日快照数据集，见[ST 名单和指数成分快照](#st-名单和指数成分快照)。
+
+`data_sources`、`source_config` 是数据来源记录（#99），格式和读取规则见 [data-sources.md 的“来源记录”](data-sources.md#来源记录)，读写在 `storage/sources.py`。升级前的快照没有这两个数据集，读出来全部是“来源未知”；同步还没有写入它们（见 data-sources.md 的[实现拆分](data-sources.md#实现拆分)）。
 
 `delist_date_quality` 是平台自己的数据集，不是插件的输出格式。每只证券一行，和 `securities` 在同一个事务里写入：有退市日的行：`exact` 为 True 表示退市日精确，为 False 表示近似值（数据源的 `exact_delist_date` 为 False）。没有退市日（在市）的行：精确数据源写的记 True，意思是“精确数据源确认在市”，近似数据源写的为 null；`source` 是这一行（连同 `securities` 里对应的行）来自哪个数据源插件的 id，可为空（#4 起新增，旧快照没有这一列，读出来为 null，同步时当作“来源未知”，见[多个数据源的退市日](#多个数据源的退市日)）。快照里没有某只证券的行（例如 SDK 0.4.1 之前同步的快照），表示“不知道”，不能当成精确。
 

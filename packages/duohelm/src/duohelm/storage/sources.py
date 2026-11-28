@@ -142,6 +142,18 @@ def lookup_sources(
         .filter(pl.col("category") == category)
         .select("key", "source", "role")
     )
+    # 不认识的角色（以后的版本可能新增）跳过并记日志：这一行读不懂，键按“来源未知”处理，
+    # 不能当成已知来源
+    odd = rows.filter(~pl.col("role").is_in(ROLES) | pl.col("role").is_null())
+    if odd.height:
+        logger.warning(
+            "快照 %s 的 data_sources 里 %s 类别有 %d 行角色不认识（%s），按来源未知处理",
+            snap,
+            category,
+            odd.height,
+            ", ".join(sorted({str(r) for r in odd.get_column("role").to_list()})),
+        )
+        rows = rows.join(odd.select("key"), on="key", how="anti")
     # 左连接：没有行的键 source 为 null，即“来源未知”；不按配置或别的线索补
     items = wanted.join(rows, on="key", how="left", maintain_order="left").with_columns(
         pl.col("source").is_not_null().alias("known")

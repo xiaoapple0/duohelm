@@ -285,7 +285,7 @@ def test_upgrade_keeps_existing_data_files_and_config(tmp_path: Path, store: Dat
     v1_plugin_config(config_path)
     before_rows = dump(config_path)
 
-    # 迁移 plugin-config.db；两个入口都能触发，顺序无关
+    # 迁移 plugin-config.db：先经过 DataSourceConfigStore（反向顺序见下一个测试）
     configs = DataSourceConfigStore(config_path)
     EndpointStore(config_path)
     conn = sqlite3.connect(config_path)
@@ -313,6 +313,53 @@ def test_upgrade_keeps_existing_data_files_and_config(tmp_path: Path, store: Dat
         assert new_manifest.datasets[name] == entries
     assert store.read("bars_1d", snapshot=snap).equals(old_bars)
     assert store.read("bars_1d").equals(old_bars)
+
+
+def test_upgrade_through_endpoint_store_then_config_store(tmp_path: Path) -> None:
+    """反向顺序：v1 只经过 EndpointStore 升到 v2，之后 DataSourceConfigStore 照常读写。"""
+    path = tmp_path / "plugin-config.db"
+    v1_plugin_config(path)
+    before_rows = dump(path)
+
+    EndpointStore(path)
+    conn = sqlite3.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    conn.close()
+    assert dump(path) == before_rows
+
+    configs = DataSourceConfigStore(path)
+    assert configs.get() == {}
+    configs.put({"adj_factors": ("xtdata", "eltdx")})
+    assert {c: (v.primary, v.backup) for c, v in DataSourceConfigStore(path).get().items()} == {
+        "adj_factors": ("xtdata", "eltdx")
+    }
+    assert dump(path) == before_rows
+
+
+def test_unknown_role_in_data_sources_reads_as_unknown(
+    store: DataStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """以后的版本可能新增角色：读到不认识的角色跳过并记日志，这个键按“来源未知”，不算已知。"""
+    with store.transaction() as tx:
+        write_sources(tx, "bars_1d", [A], source="xtdata", role="primary")
+        tx.write(
+            "data_sources",
+            pl.DataFrame(
+                {
+                    "category": ["bars_1d", "bars_1d"],
+                    "key": [B, C],
+                    "source": ["eltdx", "eltdx"],
+                    "role": ["standby", None],
+                }
+            ),
+        )
+    found = lookup_sources(store, "bars_1d", [A, B, C])
+    rows = {r["key"]: r for r in found.items.iter_rows(named=True)}
+    assert rows[A]["known"] and rows[A]["source"] == "xtdata"
+    assert rows[B] == {"key": B, "source": None, "role": None, "known": False}
+    assert rows[C] == {"key": C, "source": None, "role": None, "known": False}
+    assert found.unknown() == [B, C]
+    assert "standby" in caplog.text
 
 
 def test_fresh_plugin_config_has_both_versions(tmp_path: Path) -> None:

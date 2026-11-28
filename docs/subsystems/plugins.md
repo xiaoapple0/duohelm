@@ -216,6 +216,12 @@ with session_for(
 
 **含义澄清，不升版本（2026-11-27，维护者决定）**：`index_constituents` 的 `in_date`、`out_date` 此前只在文档字符串里写了“仍在指数中则为 null”，现在写全了上面的含义（平台的指数成分快照早已按这个含义过滤，见 `data.md`）。方法签名、返回格式和 `__all__` 都没有变，SDK 版本号不变。eltdx 和 xtdata 插件在 main 上都只返回当前成分（`out_date` 全为 null），与此一致，不需要改动
 
+**SDK 0.4.3（M1）**，兼容，修复 `duohelm_sdk.adjust.factors_from_events`（不在 `__all__` 里，签名和返回格式不变）：
+
+- 除权日之前最近的收盘价 P 不是有限正数时，事件按无效处理（`on_invalid="raise"` 抛 `InvalidExEventError`，`"skip"` 丢弃），和参考价不为正的事件一样。之前只检查参考价：P 为 0 而配股使参考价为正时，比例为 0，之后的因子全部为 0。xtdata 对退市股返回的价格全为 0，触发了这个问题
+- 同时按无效处理的还有两种“未知”，之前都被悄悄当成不存在：除权日之前最近的一行收盘价为 null（之前被当成“上市前的事件”丢掉）；事件的 `cash`、`bonus`、`rights`、`rights_price` 有 null（之前比例为 null，累乘时跳过，等于没有这个事件）。**这一项会让原来能算出结果的输入在 `on_invalid="raise"` 时报错**。核对过 eltdx、xtdata 两个官方插件：事件字段都由数值算出，不会是 null，收盘价也不会是 null，不受影响
+- 输入合法时结果不变（黄金数据集第一层、第二层均不变）。插件不需要改清单的 `sdk` 范围
+
 **SDK 0.4.2（M1）**，兼容，只新增一个异常类（#56，维护者 2026-11-27 批准）：
 
 - `LookupFailedError`（`duohelm_sdk.__all__`，继承 `Exception`）：`DataSourcePlugin.lookup_securities` 查询失败时抛它。**返回空结果仍表示“确定没有这个代码”**，抛这个异常表示“不知道”。此前接口分不清两者，数据源一时返回空会被记成“没找到”，要等重扫间隔才被重查

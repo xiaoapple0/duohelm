@@ -129,6 +129,46 @@ def test_invalid_event() -> None:
     assert factors_from_events(c, bad, on_invalid="skip").height == 0
 
 
+@pytest.mark.parametrize("prev_close", [0.0, -0.0, -1.0, float("nan"), float("inf")])
+def test_non_positive_prev_close_is_invalid(prev_close: float) -> None:
+    """除权前收盘价不是有限正数（xtdata 对退市股返回的价格全为 0）：配股的参考价仍为正，
+    比例 P / ref 会是 0，之后的因子全部变成 0。必须当作无效事件。"""
+    c = closes([(D[0], "A", 10.0), (D[1], "A", prev_close), (D[3], "A", 10.0)])
+    ev = events(
+        [
+            (D[2], "A", 0.08, 0.3, 0.4, 10.0),  # 配股：P 为 0 时参考价 (0 - 0.08 + 4) / 1.7 > 0
+            (D[4], "A", 1.0, 0.0, 0.0, 0.0),  # 之后一个正常的派现
+        ]
+    )
+    with pytest.raises(InvalidExEventError):
+        factors_from_events(c, ev)
+    f = factors_from_events(c, ev, on_invalid="skip")
+    assert f["date"].to_list() == [D[4]]
+    assert f["factor"].to_list() == pytest.approx([10.0 / 9.0])
+    assert check_adj_factors(f).passed
+
+
+def test_null_prev_close_is_invalid_not_before_listing() -> None:
+    """除权日前一行的收盘价是 null：价格未知，不能当成“上市前的事件”悄悄丢掉。"""
+    c = closes([(D[0], "A", 10.0), (D[1], "A", None)])
+    ev = events([(D[2], "A", 1.0, 0.0, 0.0, 0.0)])
+    with pytest.raises(InvalidExEventError):
+        factors_from_events(c, ev)
+    assert factors_from_events(c, ev, on_invalid="skip").height == 0
+
+
+@pytest.mark.parametrize("field", [2, 3, 4, 5])  # cash、bonus、rights、rights_price
+def test_null_event_field_is_invalid(field: int) -> None:
+    """事件字段为 null 是“未知”，不是 0。之前比例为 null，product 跳过它，事件等于不存在。"""
+    c = closes([(D[0], "A", 10.0)])
+    row = [D[1], "A", 1.0, 0.0, 0.0, 0.0]
+    row[field] = None
+    ev = events([tuple(row)])
+    with pytest.raises(InvalidExEventError):
+        factors_from_events(c, ev)
+    assert factors_from_events(c, ev, on_invalid="skip").height == 0
+
+
 def test_check_adj_factors() -> None:
     good = pl.DataFrame({"date": [D[0]], "symbol": ["A"], "factor": [1.2]})
     assert check_adj_factors(good).passed

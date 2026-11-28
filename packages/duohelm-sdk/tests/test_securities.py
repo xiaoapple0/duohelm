@@ -108,6 +108,14 @@ def test_capabilities_lists_delisted_defaults_false() -> None:
     assert caps.lists_delisted is False
 
 
+def test_capabilities_categories_defaults_to_undeclared() -> None:
+    # 没声明是 None（平台按提供四个类别处理），不是空元组（不提供任何类别）
+    caps = Capabilities(markets=("CN",), freqs=(Freq.DAY,), fields=())
+    assert caps.categories is None
+    declared = Capabilities(markets=("CN",), freqs=(Freq.DAY,), fields=(), categories=("bars_1d",))
+    assert declared.categories == ("bars_1d",)
+
+
 def test_securities_include_delisted() -> None:
     source = _Source()
     assert "600087.SH" not in source.securities()["symbol"].to_list()

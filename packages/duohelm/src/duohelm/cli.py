@@ -69,7 +69,15 @@ def _serve(settings: Settings, out: TextIO) -> int:
     from duohelm.api.web import has_web_build  # noqa: PLC0415
 
     if has_web_build(settings.web_dir):
-        print(f"Web 页面: http://{_url_host(settings.host)}:{settings.port}/", file=out)
+        url_host = _url_host(settings.host)
+        if url_host is None:
+            print(
+                f"Web 页面只能在本机打开：没有监听 127.0.0.1 或 [::1]，而来源校验只接受"
+                f"本机地址（Host 为 127.0.0.1、localhost 或 [::1] 加端口 {settings.port}）",
+                file=out,
+            )
+        else:
+            print(f"Web 页面: http://{url_host}:{settings.port}/", file=out)
     else:
         print(
             f"没有找到构建好的 Web 页面（{settings.web_dir}），只提供 API。"
@@ -93,9 +101,14 @@ def _utf8_when_redirected() -> None:
             stream.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
-def _url_host(host: str) -> str:
-    if host in ("0.0.0.0", "::"):
+def _url_host(host: str) -> str | None:
+    """页面在本机的地址。来源校验只接受本机地址，所以只监听局域网地址时没有能打开的地址。"""
+    if host == "0.0.0.0":
         return "127.0.0.1"
+    if host == "::":
+        return "[::1]"  # 只监听 IPv6 时 127.0.0.1 可能连不上
+    if not is_loopback(host):
+        return None
     return f"[{host}]" if ":" in host else host
 
 

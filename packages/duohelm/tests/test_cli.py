@@ -63,6 +63,14 @@ def test_serve_prints_page_url(tmp_path, monkeypatch) -> None:
     text = _serve_output(tmp_path, monkeypatch, ["--host", "0.0.0.0"], dist)
     assert "http://127.0.0.1:8765/" in text
     assert "局域网" in text
+    text = _serve_output(tmp_path, monkeypatch, ["--host", "::"], dist)
+    assert "http://[::1]:8765/" in text
+    text = _serve_output(tmp_path, monkeypatch, ["--host", "localhost"], dist)
+    assert "http://localhost:8765/" in text
+    # 只监听局域网地址：按这个地址访问会因为 Host 不对被拒绝，不打印它
+    text = _serve_output(tmp_path, monkeypatch, ["--host", "192.168.1.20"], dist)
+    assert "http://192.168.1.20" not in text
+    assert "只能在本机打开" in text
 
 
 def test_serve_without_build_explains(tmp_path, monkeypatch) -> None:

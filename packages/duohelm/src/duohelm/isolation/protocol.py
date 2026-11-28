@@ -119,6 +119,12 @@ def encode(value: object, frames: FrameStore) -> Any:  # noqa: PLR0911  按类�
     if isinstance(value, date):
         return {"$date": value.isoformat()}
     if isinstance(value, Capabilities):
+        if isinstance(value.categories, str):
+            # 单个字符串会被逐字符拆开，读成“不提供任何类别”，所以直接拒绝
+            raise ProtocolError(
+                "Capabilities.categories 必须是字符串的元组，"
+                f"不能是单个字符串：{value.categories!r}"
+            )
         return {
             "$capabilities": {
                 "markets": list(value.markets),

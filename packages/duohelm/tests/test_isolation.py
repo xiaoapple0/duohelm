@@ -767,3 +767,18 @@ def test_capabilities_unknown_category_skipped(
     # 只声明了不认识的类别：读成空元组（声明了、但不提供现有的任何类别），不是 None
     only_new = {"$capabilities": {**newer["$capabilities"], "categories": ["bars_1m"]}}
     assert decode(only_new, store).categories == ()
+
+
+def test_capabilities_categories_single_string_rejected(tmp_path: Path) -> None:
+    from duohelm_sdk import Capabilities, Freq  # noqa: PLC0415
+
+    # 单个字符串会被逐字符拆开、读成“不提供任何类别”，编码时直接拒绝
+    store = FrameStore(tmp_path, "t")
+    caps = Capabilities(
+        markets=("CN",),
+        freqs=(Freq.DAY,),
+        fields=(),
+        categories="bars_1d",  # pyright: ignore[reportArgumentType]
+    )
+    with pytest.raises(ProtocolError, match="categories"):
+        encode(caps, store)
